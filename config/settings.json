@@ -1,0 +1,19 @@
+{
+  "appName": "测试应用程序",
+  "version": "1.0.0",
+  "environment": "development",
+  "description": "这是一个用于测试文件同步工具的示例项目",
+  "author": "开发者",
+  "settings": {
+    "port": 3000,
+    "host": "localhost",
+    "debug": true,
+    "maxConnections": 100
+  },
+  "features": {
+    "logging": true,
+    "caching": true,
+    "compression": false
+  }
+}
+

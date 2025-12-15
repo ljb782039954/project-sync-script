@@ -1,0 +1,8 @@
+{
+  "source_path": "F:\\person\\copyUpdateFiles",
+  "target_paths": {
+    "default": "F:\\person\\copyUpdateFiles\\target-test-path",
+    "version2": "F:\\person\\version2\\target-test-path"
+  }
+}
+
