@@ -26,6 +26,9 @@ function main() {
     console.log('应用程序运行完成');
 }
 
+// 导出主函数供其他模块使用
+module.exports = { main };
+
 // 执行主函数
 main();
 
