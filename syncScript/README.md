@@ -12,28 +12,6 @@
 - ✅ **自动化集成**：通过 Git Hook 实现自动同步
 - ✅ **文件删除处理**：自动处理源项目中删除的文件
 
-## 项目结构
-
-```
-copyUpdateFiles/
-├── sync_to_target.ps1          # PowerShell 同步脚本（Windows）
-├── sync_to_target.sh            # Bash 同步脚本（Linux/Mac/Git Bash）
-├── config.json                  # 配置文件（JSON 格式）
-├── .git/hooks/
-│   └── post-commit             # Git Hook（自动触发同步）
-├── test-project-cn/            # 测试原始项目（中文）
-│   ├── src/
-│   │   ├── main.js
-│   │   └── utils/
-│   │       └── helper.js
-│   ├── config/
-│   │   └── settings.json
-│   ├── README.md
-│   └── .gitignore
-├── test-project-en/            # 测试目标项目（英文，同步后生成）
-└── README.md                    # 本文件
-```
-
 ## 安装和配置
 
 ### 1. 准备项目目录
@@ -43,7 +21,11 @@ copyUpdateFiles/
 
 ### 2. 复制同步脚本
 
-将 `sync_to_target.ps1`（Windows）或 `sync_to_target.sh`（Linux/Mac）复制到您的项目根目录。
+将 `syncScript` 文件夹复制到您的项目根目录。`syncScript` 文件夹包含：
+- `sync_to_target.ps1` - PowerShell 同步脚本（Windows）
+- `sync_to_target.sh` - Bash 同步脚本（Linux/Mac/Git Bash）
+- `config.json` - 配置文件
+- `.git_hooks/` - Git Hook 模板目录
 
 ### 3. 创建配置文件
 
@@ -51,21 +33,14 @@ copyUpdateFiles/
 
 ```json
 {
-  "source_path": "F:\\person\\copyUpdateFiles\\test-project-cn",
+  "source_path": "F:\\person\\copyUpdateFiles\\source_path",
   "target_paths": {
-    "default": "F:\\person\\copyUpdateFiles\\test-project-en",
-    "version2": "E:\\person\\copyUpdateFiles\\test-project-en"
+    "default": "F:\\person\\target_path\\test\\target-test-path",
+    "version2": "F:\\person\\target_path\\version2\\target-test-path"
   }
 }
-```
 
-**JSON 格式说明：**
-- `source_path`: 原始项目路径（必填）
-- `target_paths`: 目标项目路径对象或数组（必填）
-  - **对象格式**：使用键值对，键名可以自定义（如 `default`、`version2`）
-  - **数组格式**：`"target_paths": ["path1", "path2"]`
-- 支持绝对路径和相对路径
-- Windows 路径中的反斜杠需要转义（`\\`）
+```
 
 ### 4. 设置脚本执行权限（Linux/Mac/Git Bash）
 
@@ -90,69 +65,60 @@ sudo yum install jq
 
 **注意：** 即使没有安装 `jq`，脚本也能正常工作（使用内置的简单 JSON 解析器）。
 
-### 5. 配置 Git Hook（可选，用于自动同步）
+### 5. Git Hook 自动安装
 
-编辑 `.git/hooks/post-commit` 文件，根据您的系统选择使用 PowerShell 或 Bash 版本（取消对应注释）：
+脚本会自动检测并安装 Git Hook。Git Hook 模板位于 `syncScript/.git_hooks/` 目录，脚本运行时会自动复制到 `.git/hooks/` 目录。
 
-**PowerShell 版本（Windows）：**
-```powershell
-SCRIPT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-powershell.exe -ExecutionPolicy Bypass -File "$SCRIPT_DIR/sync_to_target.ps1"
-```
-
-**Bash 版本（Linux/Mac/Git Bash）：**
-```bash
-SCRIPT_DIR="$(cd "$(dirname "$0")/../.." && pwd)"
-"$SCRIPT_DIR/sync_to_target.sh"
-```
-
-**注意**：Git Hook 会自动读取 `config.json` 配置文件，无需在 Hook 中指定路径。
+**注意**：
+- Git Hook 会自动读取 `config.json` 配置文件
+- Git Hook 使用增量同步模式（只同步变更的文件）
+- 如果模板文件更新，脚本会自动更新已安装的 Hook
 
 ## 使用方法
 
-### 方法一：使用配置文件（推荐）
+### 方法一：增量同步（默认）
 
-脚本会自动读取 `config.json` 配置文件，同步到所有配置的目标路径。
+脚本会自动读取 `config.json` 配置文件，只同步 Git 变更的文件到所有配置的目标路径。
 
 #### Windows PowerShell
 
 ```powershell
-# 直接运行，自动读取 config.json
+# 进入 syncScript 目录
+cd syncScript
+
+# 运行增量同步
 .\sync_to_target.ps1
 ```
 
 #### Linux/Mac/Git Bash
 
 ```bash
-# 直接运行，自动读取 config.json
+# 进入 syncScript 目录
+cd syncScript
+
+# 运行增量同步
 ./sync_to_target.sh
 ```
 
-### 方法二：使用命令行参数（可选）
+### 方法二：完全同步
 
-如果提供了命令行参数，会优先使用命令行参数而不是配置文件。
+使用 `--all` 参数进行完全同步，会同步所有文件（排除 `.gitignore` 中标记的文件、`syncScript` 文件夹等）。
 
 #### Windows PowerShell
 
 ```powershell
-# 使用相对路径
-.\sync_to_target.ps1 -TargetPath "../my-project-en"
-
-# 使用绝对路径
-.\sync_to_target.ps1 -TargetPath "C:\Projects\my-project-en"
+cd syncScript
+.\sync_to_target.ps1 --all
 ```
 
 #### Linux/Mac/Git Bash
 
 ```bash
-# 使用相对路径
-./sync_to_target.sh "../my-project-en"
-
-# 使用绝对路径
-./sync_to_target.sh "/path/to/my-project-en"
+cd syncScript
+./sync_to_target.sh --all
 ```
 
-### 方法二：Git Hook 自动运行
+### 方法三：Git Hook 自动运行
 
 配置好 Git Hook 后，每次执行 `git commit` 时，脚本会自动运行并同步文件。
 
@@ -184,44 +150,6 @@ flowchart TD
     I --> J[提交英文版本到 GitHub]
 ```
 
-## 日志文件说明
-
-每次同步都会在原始项目的 `.sync_logs/` 目录下生成一个日志文件，文件名格式：`sync_YYYYMMDD_HHMMSS.txt`
-
-日志文件包含以下信息：
-
-```
-==================================================================================
-同步时间: 2024-01-15 14:30:25
-原始项目: F:\person\copyUpdateFiles\test-project-cn
-目标项目: F:\person\copyUpdateFiles\test-project-en
-Git 仓库: 是
-==================================================================================
-
-[新增] src/main.js
-[修改] config/settings.json
-[删除] old-file.js
-
-开始同步文件...
-
-文件同步完成 (robocopy 返回码: 1)
-
-[已删除] old-file.js
-
-==================================================================================
-同步完成
-新增文件: 1
-修改文件: 1
-删除文件: 1
-日志文件: .sync_logs/sync_20240115_143025.txt
-==================================================================================
-```
-
-### 日志文件用途
-
-1. **快速查找变更**：通过日志文件可以快速查看每次同步了哪些文件
-2. **问题排查**：如果同步出现问题，可以通过日志文件定位问题
-3. **变更追踪**：记录所有文件变更历史，方便回溯
 
 ## 同步规则
 
@@ -235,10 +163,9 @@ Git 仓库: 是
 ### 排除的文件和目录
 
 - `.git/` - Git 仓库目录
-- `.sync_logs/` - 同步日志目录
-- `sync_to_target.ps1` - PowerShell 同步脚本
-- `sync_to_target.sh` - Bash 同步脚本
-- `config.json` - JSON 配置文件
+- `.syncScript_logs/` - 同步日志目录
+- `syncScript/` - 同步脚本目录（不会同步到目标项目）
+- `.gitignore` 中标记的文件和目录
 
 ## 测试项目使用示例
 
@@ -264,36 +191,31 @@ cd ..
 
 ### 3. 创建配置文件
 
-在项目根目录创建 `config.json` 文件（推荐）：
+在 `syncScript` 目录中创建 `config.json` 文件：
 
 ```json
 {
-  "source_path": "test-project-cn",
+  "source_path": "F:\\person\\copyUpdateFiles\\source_path",
   "target_paths": {
-    "default": "test-project-en"
+    "default": "F:\\person\\target_path\\test\\target-test-path"
   }
 }
 ```
 
+**注意**：`source_path` 应该指向原始项目的根目录（包含 `syncScript` 的目录）。
 
 ### 4. 运行同步脚本
 
 ```bash
 # Windows PowerShell
-.\sync_to_target.ps1
+cd syncScript
+.\sync_to_target.ps1          # 增量同步
+.\sync_to_target.ps1 --all    # 完全同步
 
 # Linux/Mac/Git Bash
-./sync_to_target.sh
-```
-
-或者使用命令行参数：
-
-```bash
-# Windows PowerShell
-.\sync_to_target.ps1 -TargetPath "test-project-en"
-
-# Linux/Mac/Git Bash
-./sync_to_target.sh "test-project-en"
+cd syncScript
+./sync_to_target.sh           # 增量同步
+./sync_to_target.sh --all     # 完全同步
 ```
 
 ### 5. 查看同步结果
