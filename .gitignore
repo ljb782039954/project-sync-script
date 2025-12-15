@@ -33,3 +33,4 @@ desktop.ini
 *.temp
 .cache/
 
+.syncScript_logs/
