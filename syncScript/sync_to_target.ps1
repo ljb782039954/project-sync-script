@@ -475,24 +475,42 @@ function Sync-ToTarget {
     # 生成日志文件名（带时间戳）
     $Timestamp = Get-Date -Format "yyyyMMdd_HHmmss"
     $TargetName = Split-Path -Leaf $TargetDir
-    $SourceLogFile = Join-Path $SourceLogDir "sync_${TargetName}_${Timestamp}.txt"
-    $TargetLogFile = Join-Path $TargetLogDir "sync_${Timestamp}.txt"
+    $SourceLogFile = Join-Path $SourceLogDir "sync_${TargetName}_${Timestamp}.json"
+    $TargetLogFile = Join-Path $TargetLogDir "sync_${Timestamp}.json"
+    $TotalLogFile = Join-Path $TargetLogDir "total_sync_log.json"
     
     # 获取 Git 信息
     $GitInfo = Get-GitChangedFiles -SourceDir $SourceDir
     $HasGitRepo = $GitInfo.HasGitRepo
     $ChangedFiles = $GitInfo.ChangedFiles
     
-    # 记录同步开始
-    $LogContent = @()
-    $LogContent += "=" * 80
-    $LogContent += "同步时间: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
-    $LogContent += "同步模式: $(if ($FullSync) { '完全同步' } else { '增量同步' })"
-    $LogContent += "原始项目: $SourceDir"
-    $LogContent += "目标项目: $TargetDir"
-    $LogContent += "Git 仓库: $(if ($HasGitRepo) { '是' } else { '否' })"
-    $LogContent += "=" * 80
-    $LogContent += ""
+    # 记录同步开始时间
+    $SyncStartTime = Get-Date
+    $SyncStartTimeISO = $SyncStartTime.ToString("yyyy-MM-ddTHH:mm:ss.fffZ")
+    
+    # 初始化日志对象
+    $LogData = @{
+        timestamp = $SyncStartTimeISO
+        sync_mode = if ($FullSync) { "full" } else { "incremental" }
+        source_dir = $SourceDir
+        target_dir = $TargetDir
+        git_repo = $HasGitRepo
+        statistics = @{
+            added = 0
+            modified = 0
+            deleted = 0
+            total = 0
+        }
+        files = @{
+            added = @()
+            modified = @()
+            deleted = @()
+        }
+        excluded_files = @()
+        duration_ms = 0
+        status = "running"
+        errors = @()
+    }
     
     # 统计变量
     $AddedCount = 0
@@ -505,8 +523,7 @@ function Sync-ToTarget {
     
     if ($FullSync) {
         # 完全同步模式：同步所有文件
-        $LogContent += "[完全同步] 同步所有文件（排除 syncScript、.git、.syncScript_logs 和 .gitignore 中的文件）"
-        $LogContent += ""
+        Write-Host "[完全同步] 同步所有文件（排除 syncScript、.git、.syncScript_logs 和 .gitignore 中的文件）" -ForegroundColor Green
     } else {
         # 增量同步模式：只同步 Git 变更的文件
         if ($ChangedFiles.Count -gt 0) {
@@ -522,7 +539,8 @@ function Sync-ToTarget {
                     
                     # 检查是否匹配配置的排除模式
                     if (Test-ExcludePattern -FilePath $FilePath -ExcludePatterns $ExcludePatterns) {
-                        $LogContent += "[跳过] $FilePath (匹配排除模式)"
+                        $LogData.excluded_files += $FilePath
+                        Write-Host "[跳过] $FilePath (匹配排除模式)" -ForegroundColor Gray
                         continue
                     }
                     
@@ -533,16 +551,18 @@ function Sync-ToTarget {
                             # 新增文件
                             if (Test-Path $SourceFile) {
                                 $FilesToSync += $FilePath
+                                $LogData.files.added += $FilePath
                                 $AddedCount++
-                                $LogContent += "[新增] $FilePath"
+                                Write-Host "[新增] $FilePath" -ForegroundColor Green
                             }
                         }
                         'M' {
                             # 修改文件
                             if (Test-Path $SourceFile) {
                                 $FilesToSync += $FilePath
+                                $LogData.files.modified += $FilePath
                                 $ModifiedCount++
-                                $LogContent += "[修改] $FilePath"
+                                Write-Host "[修改] $FilePath" -ForegroundColor Yellow
                             }
                         }
                         'D' {

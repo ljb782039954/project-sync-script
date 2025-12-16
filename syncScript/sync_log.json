@@ -1,0 +1,30 @@
+{
+    "timestamp": "2025-12-16T15:45:51.123Z",
+    "sync_mode": "incremental",
+    "source_dir": "/path/to/source",
+    "target_dir": "/path/to/target",
+    "git_repo": true,
+    "statistics": {
+        "added": 2,
+        "modified": 1,
+        "deleted": 0,
+        "total": 3
+    },
+    "files": {
+        "added": [
+            "src/components/Button.js",
+            "src/utils/helper.js"
+        ],
+        "modified": [
+            "README.md"
+        ],
+        "deleted": []
+    },
+    "excluded_files": [
+        "node_modules/package.json",
+        "dist/main.js"
+    ],
+    "duration_ms": 1250,
+    "status": "success",
+    "errors": []
+}
