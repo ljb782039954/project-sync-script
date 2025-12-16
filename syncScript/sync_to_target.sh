@@ -22,7 +22,8 @@ read_json_config_file() {
         return 1
     fi
     
-    # 检查是否有 jq 命令
+        # 检查是否有 jq 命令
+    local exclude_patterns=()
     if command -v jq >/dev/null 2>&1; then
         # 使用 jq 解析 JSON
         source_path=$(jq -r '.source_path // empty' "$config_path" 2>/dev/null)
@@ -45,6 +46,13 @@ read_json_config_file() {
                 fi
             done < <(jq -r '.target_paths | to_entries[] | .value' "$config_path" 2>/dev/null)
         fi
+        
+        # 解析 exclude_patterns
+        while IFS= read -r pattern; do
+            if [ -n "$pattern" ] && [ "$pattern" != "null" ]; then
+                exclude_patterns+=("$pattern")
+            fi
+        done < <(jq -r '.exclude_patterns[]?' "$config_path" 2>/dev/null)
     else
         # 简单的 JSON 解析（不依赖 jq）
         # 提取 source_path
@@ -63,16 +71,39 @@ read_json_config_file() {
         if [ ${#target_paths[@]} -eq 0 ]; then
             while IFS= read -r line; do
                 local path=$(echo "$line" | sed 's/.*"\([^"]*\)".*/\1/')
-                if [ -n "$path" ] && [ "$path" != "null" ] && [ "$path" != "target_paths" ]; then
+                if [ -n "$path" ] && [ "$path" != "null" ] && [ "$path" != "target_paths" ] && [ "$path" != "exclude_patterns" ]; then
                     target_paths+=("$path")
                 fi
             done < <(grep -A 100 '"target_paths"' "$config_path" | grep -E '"[^"]*"' | head -20)
         fi
+        
+        # 简单解析 exclude_patterns（不使用 jq）
+        local in_exclude=false
+        while IFS= read -r line; do
+            if [[ "$line" =~ exclude_patterns ]]; then
+                in_exclude=true
+                continue
+            fi
+            if [ "$in_exclude" = true ]; then
+                if [[ "$line" =~ \] ]]; then
+                    break
+                fi
+                local pattern=$(echo "$line" | sed 's/.*"\([^"]*\)".*/\1/')
+                if [ -n "$pattern" ] && [ "$pattern" != "null" ]; then
+                    exclude_patterns+=("$pattern")
+                fi
+            fi
+        done < "$config_path"
     fi
     
     echo "$source_path"
     for path in "${target_paths[@]}"; do
         echo "$path"
+    done
+    # 输出排除模式（用特殊分隔符）
+    echo "---EXCLUDE_PATTERNS---"
+    for pattern in "${exclude_patterns[@]}"; do
+        echo "$pattern"
     done
 }
 
@@ -176,11 +207,51 @@ get_gitignore_patterns() {
     fi
 }
 
+# 检查文件路径是否匹配排除模式
+test_exclude_pattern() {
+    local file_path="$1"
+    shift
+    local exclude_patterns=("$@")
+    
+    for pattern in "${exclude_patterns[@]}"; do
+        local normalized_pattern=$(echo "$pattern" | tr '/' '\\')
+        local normalized_file_path=$(echo "$file_path" | tr '/' '\\')
+        
+        # 如果模式为空，跳过
+        if [ -z "$normalized_pattern" ]; then
+            continue
+        fi
+        
+        # 如果模式以 \ 开头，从根目录匹配
+        if [[ "$normalized_pattern" == \\* ]]; then
+            normalized_pattern="${normalized_pattern#\\}"
+            if [[ "$normalized_file_path" == *"\\$normalized_pattern"* ]] || [[ "$normalized_file_path" == "$normalized_pattern"* ]]; then
+                return 0
+            fi
+        # 如果模式包含 \，表示路径匹配
+        elif [[ "$normalized_pattern" == *\\* ]]; then
+            if [[ "$normalized_file_path" == *"\\$normalized_pattern"* ]] || [[ "$normalized_file_path" == *"\\$normalized_pattern\\"* ]] || [[ "$normalized_file_path" == "$normalized_pattern" ]]; then
+                return 0
+            fi
+        # 否则匹配文件名或目录名
+        else
+            local file_name=$(basename "$normalized_file_path")
+            if [[ "$file_name" == $normalized_pattern ]] || [[ "$normalized_file_path" == *"\\$normalized_pattern"* ]] || [[ "$normalized_file_path" == *"\\$normalized_pattern\\"* ]]; then
+                return 0
+            fi
+        fi
+    done
+    
+    return 1
+}
+
 # 同步到单个目标目录的函数
 sync_to_target() {
     local source_dir="$1"
     local target_dir="$2"
     local full_sync="$3"
+    shift 3
+    local exclude_patterns=("$@")
     
     echo ""
     echo "开始同步到: $target_dir"
@@ -251,6 +322,12 @@ sync_to_target() {
                     continue
                 fi
                 
+                # 检查是否匹配配置的排除模式
+                if test_exclude_pattern "$file_path" "${exclude_patterns[@]}"; then
+                    echo "[跳过] $file_path (匹配排除模式)" >> "$log_file"
+                    continue
+                fi
+                
                 case "$status" in
                     A)
                         echo "[新增] $file_path" >> "$log_file"
@@ -295,6 +372,13 @@ sync_to_target() {
             exclude_args+=("--exclude=$pattern")
         fi
     done < <(get_gitignore_patterns "$source_dir")
+    
+    # 添加配置中的排除模式
+    for pattern in "${exclude_patterns[@]}"; do
+        if [ -n "$pattern" ]; then
+            exclude_args+=("--exclude=$pattern")
+        fi
+    done
     
     if [ "$full_sync" = true ] || [ ${#files_to_sync[@]} -eq 0 ]; then
         # 完全同步或全量同步
@@ -403,11 +487,23 @@ fi
 # 安装 Git Hook
 install_git_hook "$SCRIPT_DIR" "$source_dir"
 
-# 其余行是目标路径
+# 解析配置行，找到排除模式分隔符
 target_paths=()
+exclude_patterns=()
+found_separator=false
+
 for ((i=1; i<${#config_lines[@]}; i++)); do
-    target_path=$(resolve_path_safe "${config_lines[$i]}" "$SCRIPT_DIR")
-    target_paths+=("$target_path")
+    if [ "${config_lines[$i]}" = "---EXCLUDE_PATTERNS---" ]; then
+        found_separator=true
+        continue
+    fi
+    
+    if [ "$found_separator" = true ]; then
+        exclude_patterns+=("${config_lines[$i]}")
+    else
+        target_path=$(resolve_path_safe "${config_lines[$i]}" "$SCRIPT_DIR")
+        target_paths+=("$target_path")
+    fi
 done
 
 if [ ${#target_paths[@]} -eq 0 ]; then
@@ -416,13 +512,16 @@ if [ ${#target_paths[@]} -eq 0 ]; then
 fi
 
 echo "找到 ${#target_paths[@]} 个目标路径"
+if [ ${#exclude_patterns[@]} -gt 0 ]; then
+    echo "配置了 ${#exclude_patterns[@]} 个排除模式"
+fi
 
 # 执行同步到所有目标路径
 success_count=0
 fail_count=0
 
 for target_path in "${target_paths[@]}"; do
-    if sync_to_target "$source_dir" "$target_path" "$FULL_SYNC"; then
+    if sync_to_target "$source_dir" "$target_path" "$FULL_SYNC" "${exclude_patterns[@]}"; then
         ((success_count++))
     else
         ((fail_count++))

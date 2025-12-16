@@ -37,6 +37,7 @@ function Read-JsonConfigFile {
         $config = @{
             SourcePath = ""
             TargetPaths = @()
+            ExcludePatterns = @()
         }
         
         # 解析 source_path
@@ -52,6 +53,13 @@ function Read-JsonConfigFile {
             } elseif ($jsonObj.target_paths -is [PSCustomObject]) {
                 # 对象格式: "target_paths": {"key": "path1", "key2": "path2"}
                 $config.TargetPaths = $jsonObj.target_paths.PSObject.Properties.Value
+            }
+        }
+        
+        # 解析 exclude_patterns（排除模式，类似 .gitignore）
+        if ($jsonObj.exclude_patterns) {
+            if ($jsonObj.exclude_patterns -is [System.Array]) {
+                $config.ExcludePatterns = $jsonObj.exclude_patterns
             }
         }
         
@@ -177,12 +185,60 @@ function Get-GitIgnorePatterns {
     return $Patterns
 }
 
+# 检查文件路径是否匹配排除模式
+function Test-ExcludePattern {
+    param(
+        [string]$FilePath,
+        [string[]]$ExcludePatterns
+    )
+    
+    foreach ($Pattern in $ExcludePatterns) {
+        # 支持通配符匹配
+        # 如果模式以 / 或 \ 开头，表示从根目录匹配
+        # 如果模式包含 / 或 \，表示目录匹配
+        # 否则表示文件名匹配
+        
+        $NormalizedPattern = $Pattern.Trim()
+        if ([string]::IsNullOrWhiteSpace($NormalizedPattern)) {
+            continue
+        }
+        
+        # 转换为 Windows 路径分隔符
+        $NormalizedPattern = $NormalizedPattern.Replace('/', '\')
+        $NormalizedFilePath = $FilePath.Replace('/', '\')
+        
+        # 如果模式以 \ 开头，从根目录匹配
+        if ($NormalizedPattern.StartsWith('\')) {
+            $NormalizedPattern = $NormalizedPattern.Substring(1)
+            if ($NormalizedFilePath -like "*\$NormalizedPattern" -or $NormalizedFilePath -like "$NormalizedPattern*") {
+                return $true
+            }
+        }
+        # 如果模式包含 \，表示路径匹配
+        elseif ($NormalizedPattern.Contains('\')) {
+            if ($NormalizedFilePath -like "*\$NormalizedPattern" -or $NormalizedFilePath -like "*\$NormalizedPattern\*" -or $NormalizedFilePath -eq $NormalizedPattern) {
+                return $true
+            }
+        }
+        # 否则匹配文件名或目录名
+        else {
+            $FileName = Split-Path -Leaf $NormalizedFilePath
+            if ($FileName -like $NormalizedPattern -or $NormalizedFilePath -like "*\$NormalizedPattern" -or $NormalizedFilePath -like "*\$NormalizedPattern\*") {
+                return $true
+            }
+        }
+    }
+    
+    return $false
+}
+
 # 同步到单个目标目录的函数
 function Sync-ToTarget {
     param(
         [string]$SourceDir,
         [string]$TargetDir,
-        [bool]$FullSync = $false
+        [bool]$FullSync = $false,
+        [string[]]$ExcludePatterns = @()
     )
     
     Write-Host "`n开始同步到: $TargetDir" -ForegroundColor Cyan
@@ -260,6 +316,12 @@ function Sync-ToTarget {
                         continue
                     }
                     
+                    # 检查是否匹配配置的排除模式
+                    if (Test-ExcludePattern -FilePath $FilePath -ExcludePatterns $ExcludePatterns) {
+                        $LogContent += "[跳过] $FilePath (匹配排除模式)"
+                        continue
+                    }
+                    
                     $SourceFile = Join-Path $SourceDir $FilePath
                     
                     switch ($Status) {
@@ -315,6 +377,28 @@ function Sync-ToTarget {
         } else {
             # 文件模式
             $ExcludeFiles += $Pattern
+        }
+    }
+    
+    # 添加配置中的排除模式
+    foreach ($Pattern in $ExcludePatterns) {
+        $NormalizedPattern = $Pattern.Trim().Replace('/', '\')
+        if ([string]::IsNullOrWhiteSpace($NormalizedPattern)) {
+            continue
+        }
+        
+        # 判断是目录还是文件模式
+        if ($NormalizedPattern.EndsWith('\') -or $NormalizedPattern.Contains('\') -or $NormalizedPattern -like "*/") {
+            # 目录模式
+            $DirPattern = $NormalizedPattern.TrimEnd('\').TrimEnd('/')
+            if ($DirPattern -and $ExcludeDirs -notcontains $DirPattern) {
+                $ExcludeDirs += $DirPattern
+            }
+        } else {
+            # 文件模式（通配符）
+            if ($ExcludeFiles -notcontains $NormalizedPattern) {
+                $ExcludeFiles += $NormalizedPattern
+            }
         }
     }
     
@@ -466,8 +550,14 @@ Write-Host "找到 $($TargetPaths.Count) 个目标路径" -ForegroundColor Green
 $SuccessCount = 0
 $FailCount = 0
 
+# 获取排除模式
+$ExcludePatterns = @()
+if ($config.ExcludePatterns) {
+    $ExcludePatterns = $config.ExcludePatterns
+}
+
 foreach ($TargetPath in $TargetPaths) {
-    if (Sync-ToTarget -SourceDir $SourceDir -TargetDir $TargetPath -FullSync $FullSyncMode) {
+    if (Sync-ToTarget -SourceDir $SourceDir -TargetDir $TargetPath -FullSync $FullSyncMode -ExcludePatterns $ExcludePatterns) {
         $SuccessCount++
     } else {
         $FailCount++
