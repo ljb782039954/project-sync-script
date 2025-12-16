@@ -184,7 +184,7 @@ function Clear-OldLogs {
     }
     
     try {
-        $logFiles = Get-ChildItem -Path $LogDir -Filter "sync_*.txt" | Sort-Object CreationTime -Descending
+        $logFiles = Get-ChildItem -Path $LogDir -Filter "sync_*.json" | Sort-Object CreationTime -Descending
         
         if ($logFiles.Count -gt $MaxLogs) {
             $filesToDelete = $logFiles | Select-Object -Skip $MaxLogs
@@ -205,6 +205,97 @@ function Clear-OldLogs {
         }
     } catch {
         Write-Host "警告: 清理日志文件时出错: $_" -ForegroundColor Yellow
+    }
+}
+
+# 更新统计日志文件
+function Update-TotalSyncLog {
+    param(
+        [string]$TotalLogFile,
+        [object]$LogData
+    )
+    
+    try {
+        # 读取现有的统计日志
+        $totalLog = @{
+            last_updated = $LogData.timestamp
+            total_syncs = 1
+            summary = @{
+                total_files_added = $LogData.statistics.added
+                total_files_modified = $LogData.statistics.modified
+                total_files_deleted = $LogData.statistics.deleted
+                total_operations = $LogData.statistics.total
+            }
+            recent_syncs = @()
+            all_files = @{
+                added = @()
+                modified = @()
+                deleted = @()
+            }
+        }
+        
+        # 如果统计日志文件已存在，读取并更新
+        if (Test-Path $TotalLogFile) {
+            $existingLog = Get-Content -Path $TotalLogFile -Encoding UTF8 -Raw | ConvertFrom-Json
+            
+            $totalLog.total_syncs = $existingLog.total_syncs + 1
+            $totalLog.summary.total_files_added = $existingLog.summary.total_files_added + $LogData.statistics.added
+            $totalLog.summary.total_files_modified = $existingLog.summary.total_files_modified + $LogData.statistics.modified
+            $totalLog.summary.total_files_deleted = $existingLog.summary.total_files_deleted + $LogData.statistics.deleted
+            $totalLog.summary.total_operations = $existingLog.summary.total_operations + $LogData.statistics.total
+            
+            # 保留最近的同步记录（最多20条）
+            $totalLog.recent_syncs = @($existingLog.recent_syncs | Select-Object -First 19)
+            
+            # 合并文件记录
+            $totalLog.all_files.added = @($existingLog.all_files.added)
+            $totalLog.all_files.modified = @($existingLog.all_files.modified)
+            $totalLog.all_files.deleted = @($existingLog.all_files.deleted)
+        }
+        
+        # 添加当前同步记录到最近同步列表
+        $recentSync = @{
+            timestamp = $LogData.timestamp
+            sync_mode = $LogData.sync_mode
+            target_dir = $LogData.target_dir
+            statistics = $LogData.statistics
+            status = $LogData.status
+        }
+        $totalLog.recent_syncs = @($recentSync) + $totalLog.recent_syncs
+        
+        # 添加文件记录
+        foreach ($file in $LogData.files.added) {
+            $totalLog.all_files.added += @{
+                file = $file
+                timestamp = $LogData.timestamp
+                target = $LogData.target_dir
+            }
+        }
+        
+        foreach ($file in $LogData.files.modified) {
+            $totalLog.all_files.modified += @{
+                file = $file
+                timestamp = $LogData.timestamp
+                target = $LogData.target_dir
+            }
+        }
+        
+        foreach ($file in $LogData.files.deleted) {
+            $totalLog.all_files.deleted += @{
+                file = $file
+                timestamp = $LogData.timestamp
+                target = $LogData.target_dir
+            }
+        }
+        
+        # 写入统计日志文件
+        $totalLogJson = $totalLog | ConvertTo-Json -Depth 10 -Compress:$false
+        [System.IO.File]::WriteAllText($TotalLogFile, $totalLogJson, [System.Text.Encoding]::UTF8)
+        
+        Write-Host "已更新统计日志: $TotalLogFile" -ForegroundColor Green
+        
+    } catch {
+        Write-Host "警告: 无法更新统计日志文件: $_" -ForegroundColor Yellow
     }
 }
 
@@ -568,19 +659,27 @@ function Sync-ToTarget {
                         'D' {
                             # 删除文件
                             $FilesToDelete += $FilePath
+                            $LogData.files.deleted += $FilePath
                             $DeletedCount++
-                            $LogContent += "[删除] $FilePath"
+                            Write-Host "[删除] $FilePath" -ForegroundColor Red
                         }
                     }
                 }
             }
         } else {
             if ($HasGitRepo) {
-                $LogContent += "[增量同步] 未检测到 Git 变更"
+                Write-Host "[增量同步] 未检测到 Git 变更" -ForegroundColor Gray
             } else {
-                $LogContent += "[增量同步] 当前目录不是 Git 仓库，无法进行增量同步"
+                Write-Host "[增量同步] 当前目录不是 Git 仓库，无法进行增量同步" -ForegroundColor Yellow
             }
         }
+    }
+    
+    # 更新统计信息
+    $LogData.statistics.added = $AddedCount
+    $LogData.statistics.modified = $ModifiedCount
+    $LogData.statistics.deleted = $DeletedCount
+    $LogData.statistics.total = $AddedCount + $ModifiedCount + $DeletedCount
     }
     
     # 显示预览（如果启用）
@@ -601,9 +700,7 @@ function Sync-ToTarget {
     }
     
     # 执行文件同步
-    $LogContent += ""
-    $LogContent += "开始同步文件..."
-    $LogContent += ""
+    Write-Host "`n开始同步文件..." -ForegroundColor Cyan
     
     # 构建 robocopy 排除参数
     $ExcludeDirs = @(".git", ".syncScript_logs", "syncScript")
@@ -681,10 +778,10 @@ function Sync-ToTarget {
             
             if (Test-Path $SourceFile) {
                 Copy-Item -Path $SourceFile -Destination $TargetFile -Force
-                $LogContent += "[已同步] $FilePath"
+                Write-Host "[已同步] $FilePath" -ForegroundColor Green
             }
         }
-        $LogContent += "增量文件同步完成"
+        Write-Host "增量文件同步完成" -ForegroundColor Green
     } else {
         # 完全同步或全量同步
         $RobocopyResult = & robocopy @RobocopyArgs 2>&1 | Out-Null
@@ -693,9 +790,10 @@ function Sync-ToTarget {
         # robocopy 返回码: 0-7 表示成功，8+ 表示错误
         if ($RobocopyExitCode -ge 8) {
             Write-Host "警告: robocopy 同步过程中出现错误 (返回码: $RobocopyExitCode)" -ForegroundColor Yellow
-            $LogContent += "警告: robocopy 返回码: $RobocopyExitCode"
+            $LogData.errors += "robocopy 返回码: $RobocopyExitCode"
+            $LogData.status = "warning"
         } else {
-            $LogContent += "文件同步完成 (robocopy 返回码: $RobocopyExitCode)"
+            Write-Host "文件同步完成 (robocopy 返回码: $RobocopyExitCode)" -ForegroundColor Green
         }
     }
     
@@ -705,31 +803,37 @@ function Sync-ToTarget {
         if (Test-Path $TargetFile) {
             try {
                 Remove-Item -Path $TargetFile -Force -Recurse -ErrorAction Stop
-                $LogContent += "[已删除] $FilePath"
+                Write-Host "[已删除] $FilePath" -ForegroundColor Red
             } catch {
-                $LogContent += "[删除失败] $FilePath - 错误: $_"
+                $LogData.errors += "删除失败: $FilePath - $_"
                 Write-Host "警告: 无法删除文件 $FilePath" -ForegroundColor Yellow
+                $LogData.status = "warning"
             }
         } else {
-            $LogContent += "[跳过删除] $FilePath - 文件不存在于目标目录"
+            Write-Host "[跳过删除] $FilePath - 文件不存在于目标目录" -ForegroundColor Gray
         }
     }
     
-    # 记录同步结果
-    $LogContent += ""
-    $LogContent += "=" * 80
-    $LogContent += "同步完成"
-    $LogContent += "新增文件: $AddedCount"
-    $LogContent += "修改文件: $ModifiedCount"
-    $LogContent += "删除文件: $DeletedCount"
-    $LogContent += "源项目日志: $SourceLogFile"
-    $LogContent += "目标项目日志: $TargetLogFile"
-    $LogContent += "=" * 80
+    # 计算同步耗时并完成日志
+    $SyncEndTime = Get-Date
+    $LogData.duration_ms = [int](($SyncEndTime - $SyncStartTime).TotalMilliseconds)
     
-    # 写入日志文件（使用 UTF-8 with BOM 编码）
-    $Utf8WithBom = New-Object System.Text.UTF8Encoding $true
-    [System.IO.File]::WriteAllLines($SourceLogFile, $LogContent, $Utf8WithBom)
-    [System.IO.File]::WriteAllLines($TargetLogFile, $LogContent, $Utf8WithBom)
+    # 设置最终状态
+    if ($LogData.status -eq "running") {
+        $LogData.status = "success"
+    }
+    
+    # 写入 JSON 日志文件
+    try {
+        $LogJson = $LogData | ConvertTo-Json -Depth 10 -Compress:$false
+        [System.IO.File]::WriteAllText($SourceLogFile, $LogJson, [System.Text.Encoding]::UTF8)
+        [System.IO.File]::WriteAllText($TargetLogFile, $LogJson, [System.Text.Encoding]::UTF8)
+    } catch {
+        Write-Host "警告: 无法写入日志文件: $_" -ForegroundColor Yellow
+    }
+    
+    # 更新统计日志文件
+    Update-TotalSyncLog -TotalLogFile $TotalLogFile -LogData $LogData
     
     # 清理旧日志文件
     if ($SyncOptions.LogRetention) {
@@ -746,7 +850,6 @@ function Sync-ToTarget {
     Write-Host "目标项目日志: $TargetLogFile" -ForegroundColor Yellow
     
     return $true
-}
 
 # ============================================================================
 # 主程序逻辑

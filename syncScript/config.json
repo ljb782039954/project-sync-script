@@ -2,7 +2,7 @@
   "source_path": "..\\..\\source_path",
   "target_paths": {
     "default": "..\\..\\target_path\\test\\target-test-path",
-    "version2": "..\\..\\target_path\\version2\\target-test-path",
+    "version2": "..\\..\\target_path\\version2\\target-test-path"
   },
   "exclude_patterns": [
     "syncScript/",

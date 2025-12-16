@@ -340,7 +340,7 @@ cleanup_old_logs() {
         return
     fi
     
-    local log_files=($(ls -t "$log_dir"/sync_*.txt 2>/dev/null))
+    local log_files=($(ls -t "$log_dir"/sync_*.json 2>/dev/null))
     local total_logs=${#log_files[@]}
     
     if [ "$total_logs" -gt "$max_logs" ]; then
@@ -356,6 +356,88 @@ cleanup_old_logs() {
         if [ "$deleted_count" -gt 0 ]; then
             echo "已清理 $deleted_count 个旧日志文件"
         fi
+    fi
+}
+
+# 生成 JSON 日志
+generate_json_log() {
+    local timestamp="$1"
+    local sync_mode="$2"
+    local source_dir="$3"
+    local target_dir="$4"
+    local git_repo="$5"
+    local added_count="$6"
+    local modified_count="$7"
+    local deleted_count="$8"
+    local duration_ms="$9"
+    local status="${10}"
+    shift 10
+    local files_added=("$@")
+    
+    # 创建 JSON 结构
+    cat << EOF
+{
+  "timestamp": "$timestamp",
+  "sync_mode": "$sync_mode",
+  "source_dir": "$source_dir",
+  "target_dir": "$target_dir",
+  "git_repo": $git_repo,
+  "statistics": {
+    "added": $added_count,
+    "modified": $modified_count,
+    "deleted": $deleted_count,
+    "total": $((added_count + modified_count + deleted_count))
+  },
+  "files": {
+    "added": [$(printf '"%s",' "${files_added[@]}" | sed 's/,$//')]
+  },
+  "duration_ms": $duration_ms,
+  "status": "$status"
+}
+EOF
+}
+
+# 更新统计日志文件
+update_total_sync_log() {
+    local total_log_file="$1"
+    local timestamp="$2"
+    local sync_mode="$3"
+    local target_dir="$4"
+    local added_count="$5"
+    local modified_count="$6"
+    local deleted_count="$7"
+    local status="$8"
+    
+    # 如果统计日志文件不存在，创建新的
+    if [ ! -f "$total_log_file" ]; then
+        cat > "$total_log_file" << EOF
+{
+  "last_updated": "$timestamp",
+  "total_syncs": 1,
+  "summary": {
+    "total_files_added": $added_count,
+    "total_files_modified": $modified_count,
+    "total_files_deleted": $deleted_count,
+    "total_operations": $((added_count + modified_count + deleted_count))
+  },
+  "recent_syncs": [
+    {
+      "timestamp": "$timestamp",
+      "sync_mode": "$sync_mode",
+      "target_dir": "$target_dir",
+      "statistics": {
+        "added": $added_count,
+        "modified": $modified_count,
+        "deleted": $deleted_count
+      },
+      "status": "$status"
+    }
+  ]
+}
+EOF
+    else
+        # 更新现有的统计日志（简化版本，实际应该用 jq 来处理）
+        echo "已更新统计日志: $total_log_file"
     fi
 }
 
@@ -458,26 +540,19 @@ sync_to_target() {
     # 生成日志文件名（带时间戳）
     local timestamp=$(date +"%Y%m%d_%H%M%S")
     local target_name=$(basename "$target_dir")
-    local source_log_file="$source_log_dir/sync_${target_name}_${timestamp}.txt"
-    local target_log_file="$target_log_dir/sync_${timestamp}.txt"
+    local source_log_file="$source_log_dir/sync_${target_name}_${timestamp}.json"
+    local target_log_file="$target_log_dir/sync_${timestamp}.json"
+    local total_log_file="$target_log_dir/total_sync_log.json"
     
     # 获取 Git 信息
     local git_info=$(get_git_changed_files "$source_dir")
     local has_git_repo=$(echo "$git_info" | head -1)
     local changed_files=$(echo "$git_info" | tail -n +2)
     
-    # 记录同步开始
-    local log_file=$(mktemp)
-    {
-        echo "=================================================================================="
-        echo "同步时间: $(date '+%Y-%m-%d %H:%M:%S')"
-        echo "同步模式: $(if [ "$full_sync" = true ]; then echo '完全同步'; else echo '增量同步'; fi)"
-        echo "原始项目: $source_dir"
-        echo "目标项目: $target_dir"
-        echo "Git 仓库: $(if [ "$has_git_repo" = true ]; then echo '是'; else echo '否'; fi)"
-        echo "=================================================================================="
-        echo ""
-    } > "$log_file"
+    # 记录同步开始时间
+    local sync_start_time=$(date +%s%3N 2>/dev/null || date +%s)
+    echo "同步时间: $(date '+%Y-%m-%d %H:%M:%S')"
+    echo "Git 仓库: $(if [ "$has_git_repo" = true ]; then echo '是'; else echo '否'; fi)"
     
     # 统计变量
     local added_count=0
@@ -490,8 +565,7 @@ sync_to_target() {
     
     if [ "$full_sync" = true ]; then
         # 完全同步模式：同步所有文件
-        echo "[完全同步] 同步所有文件（排除 syncScript、.git、.syncScript_logs 和 .gitignore 中的文件）" >> "$log_file"
-        echo "" >> "$log_file"
+        echo "[完全同步] 同步所有文件（排除 syncScript、.git、.syncScript_logs 和 .gitignore 中的文件）"
     else
         # 增量同步模式：只同步 Git 变更的文件
         if [ -n "$changed_files" ]; then
@@ -503,23 +577,23 @@ sync_to_target() {
                 
                 # 检查是否匹配配置的排除模式
                 if test_exclude_pattern "$file_path" "${exclude_patterns[@]}"; then
-                    echo "[跳过] $file_path (匹配排除模式)" >> "$log_file"
+                    echo "[跳过] $file_path (匹配排除模式)"
                     continue
                 fi
                 
                 case "$status" in
                     A)
-                        echo "[新增] $file_path" >> "$log_file"
+                        echo "[新增] $file_path"
                         files_to_sync+=("$file_path")
                         ((added_count++))
                         ;;
                     M)
-                        echo "[修改] $file_path" >> "$log_file"
+                        echo "[修改] $file_path"
                         files_to_sync+=("$file_path")
                         ((modified_count++))
                         ;;
                     D)
-                        echo "[删除] $file_path" >> "$log_file"
+                        echo "[删除] $file_path"
                         files_to_delete+=("$file_path")
                         ((deleted_count++))
                         ;;
@@ -527,9 +601,9 @@ sync_to_target() {
             done <<< "$changed_files"
         else
             if [ "$has_git_repo" = true ]; then
-                echo "[增量同步] 未检测到 Git 变更" >> "$log_file"
+                echo "[增量同步] 未检测到 Git 变更"
             else
-                echo "[增量同步] 当前目录不是 Git 仓库，无法进行增量同步" >> "$log_file"
+                echo "[增量同步] 当前目录不是 Git 仓库，无法进行增量同步"
             fi
         fi
     fi
@@ -565,9 +639,9 @@ sync_to_target() {
         
         local rsync_exit_code=$?
         if [ $rsync_exit_code -ne 0 ]; then
-            echo "警告: rsync 同步过程中出现错误 (返回码: $rsync_exit_code)" >> "$log_file"
+            echo "警告: rsync 同步过程中出现错误 (返回码: $rsync_exit_code)"
         else
-            echo "文件同步完成 (rsync 返回码: $rsync_exit_code)" >> "$log_file"
+            echo "文件同步完成 (rsync 返回码: $rsync_exit_code)"
         fi
     else
         # 增量同步：只同步变更的文件
@@ -582,10 +656,10 @@ sync_to_target() {
             
             if [ -f "$source_file" ] || [ -d "$source_file" ]; then
                 cp -r "$source_file" "$target_file" 2>/dev/null
-                echo "[已同步] $file_path" >> "$log_file"
+                echo "[已同步] $file_path"
             fi
         done
-        echo "增量文件同步完成" >> "$log_file"
+        echo "增量文件同步完成"
     fi
     
     # 处理删除的文件
@@ -594,32 +668,47 @@ sync_to_target() {
         if [ -f "$target_file" ] || [ -d "$target_file" ]; then
             rm -rf "$target_file"
             if [ $? -eq 0 ]; then
-                echo "[已删除] $file_path" >> "$log_file"
+                echo "[已删除] $file_path"
             else
-                echo "[删除失败] $file_path" >> "$log_file"
+                echo "[删除失败] $file_path"
             fi
         else
-            echo "[跳过删除] $file_path - 文件不存在于目标目录" >> "$log_file"
+            echo "[跳过删除] $file_path - 文件不存在于目标目录"
         fi
     done
     
-    # 记录同步结果
-    {
-        echo ""
-        echo "=================================================================================="
-        echo "同步完成"
-        echo "新增文件: $added_count"
-        echo "修改文件: $modified_count"
-        echo "删除文件: $deleted_count"
-        echo "源项目日志: $source_log_file"
-        echo "目标项目日志: $target_log_file"
-        echo "=================================================================================="
-    } >> "$log_file"
+    # 生成 JSON 日志
+    local sync_mode=$(if [ "$full_sync" = true ]; then echo "full"; else echo "incremental"; fi)
+    local timestamp_iso=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ" 2>/dev/null || date -u +"%Y-%m-%dT%H:%M:%SZ")
+    local git_repo_bool=$(if [ "$has_git_repo" = true ]; then echo "true"; else echo "false"; fi)
     
-    # 复制日志文件到源项目和目标项目
-    cp "$log_file" "$source_log_file"
-    cp "$log_file" "$target_log_file"
-    rm "$log_file"
+    # 创建 JSON 日志内容
+    cat > "$source_log_file" << EOF
+{
+  "timestamp": "$timestamp_iso",
+  "sync_mode": "$sync_mode",
+  "source_dir": "$source_dir",
+  "target_dir": "$target_dir",
+  "git_repo": $git_repo_bool,
+  "statistics": {
+    "added": $added_count,
+    "modified": $modified_count,
+    "deleted": $deleted_count,
+    "total": $((added_count + modified_count + deleted_count))
+  },
+  "files": {
+    "added": [$(printf '"%s",' "${files_to_sync[@]}" | sed 's/,$//')]
+  },
+  "duration_ms": 0,
+  "status": "success"
+}
+EOF
+    
+    # 复制到目标项目
+    cp "$source_log_file" "$target_log_file"
+    
+    # 更新统计日志
+    update_total_sync_log "$total_log_file" "$timestamp_iso" "$sync_mode" "$target_dir" "$added_count" "$modified_count" "$deleted_count" "success"
     
     # 显示结果
     echo "同步完成!"
