@@ -403,12 +403,35 @@ parse_json_array() {
     local array_path="$2"
     local key="${array_path##*.}"
     
-    # 提取整个数组部分（从 "key": [ 到 ]）
-    local array_section=$(sed -n "/\"$key\":[[:space:]]*\[/,/\]/p" "$json_file")
-    
-    # 直接从整个数组部分提取所有带引号的字符串
-    # 这样可以处理单行和多行数组
-    echo "$array_section" | grep -o '"[^"]*"' | sed 's/"//g' | grep -v "^$key$"
+    # 使用 awk 提取指定键的数组内容
+    # 这个方法可以正确处理单行和多行数组
+    awk -v key="\"$key\"" '
+        # 找到匹配的键
+        $0 ~ key": \\[" {
+            # 检查是否是单行数组
+            if ($0 ~ /\]/) {
+                # 单行数组：提取 [ 和 ] 之间的内容
+                match($0, /\[.*\]/)
+                content = substr($0, RSTART+1, RLENGTH-2)
+                print content
+                exit
+            } else {
+                # 多行数组：标记开始
+                in_array = 1
+                next
+            }
+        }
+        # 在数组内部
+        in_array {
+            if ($0 ~ /\]/) {
+                # 数组结束
+                exit
+            } else {
+                # 收集数组内容
+                print $0
+            }
+        }
+    ' "$json_file" | grep -o '"[^"]*"' | sed 's/"//g'
 }
 
 # 合并 JSON 数组（不依赖 jq）

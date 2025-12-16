@@ -34,25 +34,51 @@ But fails for single-line arrays:
 
 In the single-line case, the first and last line are the same line, so the entire content is deleted, resulting in no files being parsed.
 
-### Fixed Code
+### Fixed Code (Version 2 - Using awk)
 ```bash
 parse_json_array() {
     local json_file="$1"
     local array_path="$2"
     local key="${array_path##*.}"
     
-    local array_section=$(sed -n "/\"$key\":[[:space:]]*\[/,/\]/p" "$json_file")
-    echo "$array_section" | grep -o '"[^"]*"' | sed 's/"//g' | grep -v "^$key$"
+    awk -v key="\"$key\"" '
+        $0 ~ key": \\[" {
+            if ($0 ~ /\]/) {
+                match($0, /\[.*\]/)
+                content = substr($0, RSTART+1, RLENGTH-2)
+                print content
+                exit
+            } else {
+                in_array = 1
+                next
+            }
+        }
+        in_array {
+            if ($0 ~ /\]/) {
+                exit
+            } else {
+                print $0
+            }
+        }
+    ' "$json_file" | grep -o '"[^"]*"' | sed 's/"//g'
 }
 ```
 
 ### The Fix
-Instead of removing the first and last lines, we now:
-1. Extract the entire array section (including the brackets)
-2. Extract all quoted strings from the section
-3. Filter out the key name itself (which also appears as a quoted string)
+使用 awk 进行精确的 JSON 数组提取：
+1. 查找匹配的键（如 `"added": [`）
+2. 检查是否是单行数组（包含 `]`）
+   - 单行：提取 `[` 和 `]` 之间的内容
+   - 多行：标记进入数组模式，收集直到遇到 `]`
+3. 从提取的内容中提取所有引号内的字符串
+4. 不会误提取其他键名（如 `"modified"`, `"deleted"`）
 
-This works correctly for both single-line and multi-line arrays.
+这个方法可以正确处理：
+- 单行数组：`"added": ["file1.js"]`
+- 单行多元素：`"added": ["file1.js", "file2.js"]`
+- 多行数组
+- 空数组：`"added": []`
+- 嵌套在对象中的数组
 
 ## Testing
 Run the test script to verify the fix:
