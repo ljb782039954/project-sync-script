@@ -397,7 +397,46 @@ generate_json_log() {
 EOF
 }
 
-# 更新统计日志文件
+# 简单的 JSON 数组解析函数（不依赖 jq）
+parse_json_array() {
+    local json_file="$1"
+    local array_path="$2"
+    
+    # 提取 JSON 数组内容
+    # 例如：.all_files.added -> 提取 "added": [...] 中的内容
+    local array_content=$(grep -A 1000 "\"${array_path##*.}\":" "$json_file" | grep -B 1000 "]" | head -n -1 | tail -n +2)
+    
+    # 提取所有带引号的字符串
+    echo "$array_content" | grep -o '"[^"]*"' | sed 's/"//g'
+}
+
+# 合并 JSON 数组（不依赖 jq）
+merge_json_arrays() {
+    local existing_items=("$@")
+    
+    # 如果没有项目，返回空数组
+    if [ ${#existing_items[@]} -eq 0 ]; then
+        echo "[]"
+        return
+    fi
+    
+    # 构建 JSON 数组
+    local json_array="["
+    local first=true
+    for item in "${existing_items[@]}"; do
+        if [ "$first" = true ]; then
+            json_array+="\"$item\""
+            first=false
+        else
+            json_array+=",\"$item\""
+        fi
+    done
+    json_array+="]"
+    
+    echo "$json_array"
+}
+
+# 更新统计日志文件（不依赖 jq）
 update_total_sync_log() {
     local total_log_file="$1"
     local timestamp="$2"
@@ -426,29 +465,73 @@ update_total_sync_log() {
     }
 }
 EOF
+        echo "已创建统计日志: $total_log_file"
     else
-        # 使用 jq 更新现有的统计日志（如果可用）
-        if command -v jq >/dev/null 2>&1; then
-            local temp_file=$(mktemp)
-            
-            # 读取现有数据
-            local existing_total_syncs=$(jq -r '.total_syncs' "$total_log_file")
-            local existing_added=$(jq -r '.summary.total_files_added' "$total_log_file")
-            local existing_modified=$(jq -r '.summary.total_files_modified' "$total_log_file")
-            local existing_deleted=$(jq -r '.summary.total_files_deleted' "$total_log_file")
-            
-            # 计算新的总数
-            local new_total_syncs=$((existing_total_syncs + 1))
-            local new_total_added=$((existing_added + added_count))
-            local new_total_modified=$((existing_modified + modified_count))
-            local new_total_deleted=$((existing_deleted + deleted_count))
-            
-            # 合并文件列表 - 使用 jq 来合并数组
-            local merged_added=$(jq -c --argjson new "$new_files_added_str" '.all_files.added + $new' "$total_log_file")
-            local merged_modified=$(jq -c --argjson new "$new_files_modified_str" '.all_files.modified + $new' "$total_log_file")
-            local merged_deleted=$(jq -c --argjson new "$new_files_deleted_str" '.all_files.deleted + $new' "$total_log_file")
-            
-            cat > "$temp_file" << EOF
+        # 读取现有数据（使用简单的文本解析）
+        local existing_total_syncs=$(grep '"total_syncs"' "$total_log_file" | grep -o '[0-9]*')
+        local existing_added=$(grep '"total_files_added"' "$total_log_file" | grep -o '[0-9]*')
+        local existing_modified=$(grep '"total_files_modified"' "$total_log_file" | grep -o '[0-9]*')
+        local existing_deleted=$(grep '"total_files_deleted"' "$total_log_file" | grep -o '[0-9]*')
+        
+        # 计算新的总数
+        local new_total_syncs=$((existing_total_syncs + 1))
+        local new_total_added=$((existing_added + added_count))
+        local new_total_modified=$((existing_modified + modified_count))
+        local new_total_deleted=$((existing_deleted + deleted_count))
+        
+        # 解析现有的文件列表
+        local existing_added_files=()
+        local existing_modified_files=()
+        local existing_deleted_files=()
+        
+        # 提取现有的 added 文件
+        while IFS= read -r file; do
+            [ -n "$file" ] && existing_added_files+=("$file")
+        done < <(parse_json_array "$total_log_file" "all_files.added")
+        
+        # 提取现有的 modified 文件
+        while IFS= read -r file; do
+            [ -n "$file" ] && existing_modified_files+=("$file")
+        done < <(parse_json_array "$total_log_file" "all_files.modified")
+        
+        # 提取现有的 deleted 文件
+        while IFS= read -r file; do
+            [ -n "$file" ] && existing_deleted_files+=("$file")
+        done < <(parse_json_array "$total_log_file" "all_files.deleted")
+        
+        # 添加新文件到列表
+        # 解析新的 added 文件
+        if [ "$new_files_added_str" != "[]" ]; then
+            local new_added=$(echo "$new_files_added_str" | grep -o '"[^"]*"' | sed 's/"//g')
+            while IFS= read -r file; do
+                [ -n "$file" ] && existing_added_files+=("$file")
+            done <<< "$new_added"
+        fi
+        
+        # 解析新的 modified 文件
+        if [ "$new_files_modified_str" != "[]" ]; then
+            local new_modified=$(echo "$new_files_modified_str" | grep -o '"[^"]*"' | sed 's/"//g')
+            while IFS= read -r file; do
+                [ -n "$file" ] && existing_modified_files+=("$file")
+            done <<< "$new_modified"
+        fi
+        
+        # 解析新的 deleted 文件
+        if [ "$new_files_deleted_str" != "[]" ]; then
+            local new_deleted=$(echo "$new_files_deleted_str" | grep -o '"[^"]*"' | sed 's/"//g')
+            while IFS= read -r file; do
+                [ -n "$file" ] && existing_deleted_files+=("$file")
+            done <<< "$new_deleted"
+        fi
+        
+        # 构建合并后的 JSON 数组
+        local merged_added=$(merge_json_arrays "${existing_added_files[@]}")
+        local merged_modified=$(merge_json_arrays "${existing_modified_files[@]}")
+        local merged_deleted=$(merge_json_arrays "${existing_deleted_files[@]}")
+        
+        # 写入更新后的统计日志
+        local temp_file=$(mktemp)
+        cat > "$temp_file" << EOF
 {
     "last_updated": "$timestamp",
     "total_syncs": $new_total_syncs,
@@ -464,12 +547,9 @@ EOF
     }
 }
 EOF
-            
-            mv "$temp_file" "$total_log_file"
-            echo "已更新统计日志: $total_log_file"
-        else
-            echo "警告: 未安装 jq，无法更新统计日志。建议安装 jq 以获得完整功能。"
-        fi
+        
+        mv "$temp_file" "$total_log_file"
+        echo "已更新统计日志: $total_log_file"
     fi
 }
 
