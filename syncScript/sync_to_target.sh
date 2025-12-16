@@ -604,6 +604,9 @@ sync_to_target() {
         # 增量同步模式：只同步 Git 变更的文件
         if [ -n "$changed_files" ]; then
             while IFS=$'\t' read -r status file_path; do
+                # 去除文件路径两端的引号（Git 对特殊字符文件名会加引号）
+                file_path=$(echo "$file_path" | sed 's/^"//;s/"$//')
+                
                 # 排除 syncScript 文件夹（支持多种路径格式）
                 # 检查文件路径是否以 syncScript 开头（后面跟 / 或 \）
                 if [[ "$file_path" =~ ^syncScript[/\\] ]] || [[ "$file_path" == "syncScript" ]]; then
