@@ -6,20 +6,12 @@
 #   2. 完全同步: ./sync_to_target.sh --all
 
 FULL_SYNC=false
-PREVIEW_MODE=false
-REQUIRE_CONFIRMATION=false
 
 # 解析命令行参数
 for arg in "$@"; do
     case "$arg" in
         --all)
             FULL_SYNC=true
-            ;;
-        --preview|-p)
-            PREVIEW_MODE=true
-            ;;
-        --confirm|-c)
-            REQUIRE_CONFIRMATION=true
             ;;
     esac
 done
@@ -97,10 +89,7 @@ read_json_config_file() {
         # 解析 log_retention
         local max_logs=$(jq -r '.log_retention.max_logs // 30' "$config_path" 2>/dev/null)
         local auto_cleanup=$(jq -r '.log_retention.auto_cleanup // true' "$config_path" 2>/dev/null)
-        
-        # 解析 sync_options
-        local preview_mode=$(jq -r '.sync_options.preview_mode // false' "$config_path" 2>/dev/null)
-        local require_confirmation=$(jq -r '.sync_options.require_confirmation // false' "$config_path" 2>/dev/null)
+
     else
         # 简单的 JSON 解析（不依赖 jq）
         # 提取 source_path
@@ -157,8 +146,6 @@ read_json_config_file() {
     echo "---CONFIG_OPTIONS---"
     echo "$max_logs"
     echo "$auto_cleanup"
-    echo "$preview_mode"
-    echo "$require_confirmation"
 }
 
 # 读取配置文件（JSON 格式）
@@ -582,71 +569,6 @@ EOF
     fi
 }
 
-# 显示同步预览
-show_sync_preview() {
-    local source_dir="$1"
-    local target_dir="$2"
-    local full_sync="$3"
-    local added_count="$4"
-    local modified_count="$5"
-    local deleted_count="$6"
-    shift 6
-    local files_to_sync=("$@")
-    
-    echo ""
-    echo "============================================================"
-    echo "同步预览"
-    echo "============================================================"
-    echo "源目录: $source_dir"
-    echo "目标目录: $target_dir"
-    echo "同步模式: $(if [ "$full_sync" = true ]; then echo '完全同步'; else echo '增量同步'; fi)"
-    echo ""
-    
-    if [ "$full_sync" = true ]; then
-        echo "将执行完全同步（所有文件）"
-    else
-        echo "统计信息:"
-        echo "  新增文件: $added_count"
-        echo "  修改文件: $modified_count"
-        echo "  删除文件: $deleted_count"
-        
-        if [ ${#files_to_sync[@]} -gt 0 ]; then
-            echo ""
-            echo "将同步的文件:"
-            for file in "${files_to_sync[@]}"; do
-                echo "  + $file"
-            done
-        fi
-        
-        if [ $((added_count + modified_count + deleted_count)) -eq 0 ]; then
-            echo "没有文件需要同步"
-        fi
-    fi
-    
-    echo ""
-    echo "============================================================"
-}
-
-# 用户确认函数
-get_user_confirmation() {
-    local message="${1:-是否继续执行同步？}"
-    
-    while true; do
-        read -p "$message (y/n): " response
-        case "$response" in
-            [Yy]|[Yy][Ee][Ss])
-                return 0
-                ;;
-            [Nn]|[Nn][Oo])
-                return 1
-                ;;
-            *)
-                echo "请输入 y 或 n"
-                ;;
-        esac
-    done
-}
-
 # 同步到单个目标目录的函数
 sync_to_target() {
     local source_dir="$1"
@@ -916,10 +838,6 @@ if [ ${#config_lines[@]} -eq 0 ]; then
     echo '  "log_retention": {'
     echo '    "max_logs": 30,'
     echo '    "auto_cleanup": true'
-    echo '  },'
-    echo '  "sync_options": {'
-    echo '    "preview_mode": false,'
-    echo '    "require_confirmation": false'
     echo '  }'
     echo '}'
     exit 1
@@ -966,27 +884,15 @@ done
 # 解析配置选项
 max_logs=30
 auto_cleanup=true
-config_preview_mode=false
-config_require_confirmation=false
 
-if [ ${#config_options[@]} -ge 4 ]; then
+if [ ${#config_options[@]} -ge 2 ]; then
     max_logs="${config_options[0]}"
     auto_cleanup="${config_options[1]}"
-    config_preview_mode="${config_options[2]}"
-    config_require_confirmation="${config_options[3]}"
 fi
 
 # 验证配置
 if ! validate_config "$source_path" "${#target_paths[@]}" "$max_logs"; then
     exit 1
-fi
-
-# 应用命令行参数覆盖配置文件设置
-if [ "$PREVIEW_MODE" = true ]; then
-    config_preview_mode=true
-fi
-if [ "$REQUIRE_CONFIRMATION" = true ]; then
-    config_require_confirmation=true
 fi
 
 echo "找到 ${#target_paths[@]} 个目标路径"

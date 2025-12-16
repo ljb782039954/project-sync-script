@@ -11,20 +11,12 @@ param(
 
 # 手动解析命令行参数
 $FullSyncMode = $false
-$PreviewMode = $false
-$RequireConfirmation = $false
 
 if ($RemainingArgs) {
     foreach ($arg in $RemainingArgs) {
         switch ($arg) {
             { $_ -eq "--all" -or $_ -eq "-All" -or $_ -eq "-all" } {
                 $FullSyncMode = $true
-            }
-            { $_ -eq "--preview" -or $_ -eq "-Preview" -or $_ -eq "-p" } {
-                $PreviewMode = $true
-            }
-            { $_ -eq "--confirm" -or $_ -eq "-Confirm" -or $_ -eq "-c" } {
-                $RequireConfirmation = $true
             }
         }
     }
@@ -79,10 +71,6 @@ function Read-JsonConfigFile {
                 MaxLogs = 30
                 AutoCleanup = $true
             }
-            SyncOptions = @{
-                PreviewMode = $false
-                RequireConfirmation = $false
-            }
         }
         
         # 解析 source_path
@@ -117,16 +105,7 @@ function Read-JsonConfigFile {
                 $config.LogRetention.AutoCleanup = $jsonObj.log_retention.auto_cleanup
             }
         }
-        
-        # 解析 sync_options
-        if ($jsonObj.sync_options) {
-            if ($null -ne $jsonObj.sync_options.preview_mode) {
-                $config.SyncOptions.PreviewMode = $jsonObj.sync_options.preview_mode
-            }
-            if ($null -ne $jsonObj.sync_options.require_confirmation) {
-                $config.SyncOptions.RequireConfirmation = $jsonObj.sync_options.require_confirmation
-            }
-        }
+
         
         return $config
     } catch {
@@ -433,79 +412,13 @@ function Test-ExcludePattern {
     return $false
 }
 
-# 显示同步预览
-function Show-SyncPreview {
-    param(
-        [string]$SourceDir,
-        [string]$TargetDir,
-        [bool]$FullSync,
-        [array]$FilesToSync,
-        [array]$FilesToDelete,
-        [int]$AddedCount,
-        [int]$ModifiedCount,
-        [int]$DeletedCount
-    )
-    
-    Write-Host "`n" + "=" * 60 -ForegroundColor Cyan
-    Write-Host "同步预览" -ForegroundColor Cyan
-    Write-Host "=" * 60 -ForegroundColor Cyan
-    Write-Host "源目录: $SourceDir" -ForegroundColor Yellow
-    Write-Host "目标目录: $TargetDir" -ForegroundColor Yellow
-    Write-Host "同步模式: $(if ($FullSync) { '完全同步' } else { '增量同步' })" -ForegroundColor Yellow
-    Write-Host ""
-    
-    if ($FullSync) {
-        Write-Host "将执行完全同步（所有文件）" -ForegroundColor Green
-    } else {
-        Write-Host "统计信息:" -ForegroundColor White
-        Write-Host "  新增文件: $AddedCount" -ForegroundColor Green
-        Write-Host "  修改文件: $ModifiedCount" -ForegroundColor Yellow
-        Write-Host "  删除文件: $DeletedCount" -ForegroundColor Red
-        
-        if ($FilesToSync.Count -gt 0) {
-            Write-Host "`n将同步的文件:" -ForegroundColor White
-            $FilesToSync | ForEach-Object { Write-Host "  + $_" -ForegroundColor Green }
-        }
-        
-        if ($FilesToDelete.Count -gt 0) {
-            Write-Host "`n将删除的文件:" -ForegroundColor White
-            $FilesToDelete | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
-        }
-        
-        if ($FilesToSync.Count -eq 0 -and $FilesToDelete.Count -eq 0) {
-            Write-Host "没有文件需要同步" -ForegroundColor Gray
-        }
-    }
-    
-    Write-Host "`n" + "=" * 60 -ForegroundColor Cyan
-}
-
-# 用户确认函数
-function Get-UserConfirmation {
-    param([string]$Message = "是否继续执行同步？")
-    
-    do {
-        $response = Read-Host "$Message (y/n)"
-        $response = $response.ToLower().Trim()
-        
-        if ($response -eq 'y' -or $response -eq 'yes') {
-            return $true
-        } elseif ($response -eq 'n' -or $response -eq 'no') {
-            return $false
-        } else {
-            Write-Host "请输入 y 或 n" -ForegroundColor Yellow
-        }
-    } while ($true)
-}
-
 # 同步到单个目标目录的函数
 function Sync-ToTarget {
     param(
         [string]$SourceDir,
         [string]$TargetDir,
         [bool]$FullSync = $false,
-        [string[]]$ExcludePatterns = @(),
-        [object]$SyncOptions = @{}
+        [string[]]$ExcludePatterns = @()
     )
     
     Write-Host "`n开始同步到: $TargetDir" -ForegroundColor Cyan
@@ -649,40 +562,7 @@ function Sync-ToTarget {
     $LogData.statistics.modified = $ModifiedCount
     $LogData.statistics.deleted = $DeletedCount
     }
-    
-    # 显示预览（如果启用）
-    if ($SyncOptions.PreviewMode -or $SyncOptions.RequireConfirmation) {
-        Show-SyncPreview -SourceDir $SourceDir -TargetDir $TargetDir -FullSync $FullSync -FilesToSync $FilesToSync -FilesToDelete $FilesToDelete -AddedCount $AddedCount -ModifiedCount $ModifiedCount -DeletedCount $DeletedCount
-        
-        if ($SyncOptions.PreviewMode) {
-            Write-Host "预览模式：不执行实际同步操作" -ForegroundColor Yellow
-            
-            # 在预览模式下也生成日志
-            $LogData.statistics.added = $AddedCount
-            $LogData.statistics.modified = $ModifiedCount
-            $LogData.statistics.deleted = $DeletedCount
-            $LogData.status = "preview"
-            $LogData.duration_ms = 0
-            
-            # 写入预览日志
-            try {
-                $LogJson = $LogData | ConvertTo-Json -Depth 10 -Compress:$false
-                [System.IO.File]::WriteAllText($SourceLogFile, $LogJson, [System.Text.Encoding]::UTF8)
-                Write-Host "预览日志已保存: $SourceLogFile" -ForegroundColor Green
-            } catch {
-                Write-Host "警告: 无法写入预览日志: $_" -ForegroundColor Yellow
-            }
-            
-            return $true
-        }
-        
-        if ($SyncOptions.RequireConfirmation) {
-            if (-not (Get-UserConfirmation)) {
-                Write-Host "用户取消同步操作" -ForegroundColor Yellow
-                return $true
-            }
-        }
-    }
+
     
     # 执行文件同步
     Write-Host "`n开始同步文件..." -ForegroundColor Cyan
@@ -862,10 +742,6 @@ if ($null -eq $config -or [string]::IsNullOrWhiteSpace($config.SourcePath)) {
     Write-Host '  "log_retention": {' -ForegroundColor Gray
     Write-Host '    "max_logs": 30,' -ForegroundColor Gray
     Write-Host '    "auto_cleanup": true' -ForegroundColor Gray
-    Write-Host '  },' -ForegroundColor Gray
-    Write-Host '  "sync_options": {' -ForegroundColor Gray
-    Write-Host '    "preview_mode": false,' -ForegroundColor Gray
-    Write-Host '    "require_confirmation": false' -ForegroundColor Gray
     Write-Host '  }' -ForegroundColor Gray
     Write-Host '}' -ForegroundColor Gray
     exit 1
@@ -909,16 +785,10 @@ if ($config.ExcludePatterns) {
     $ExcludePatterns = $config.ExcludePatterns
 }
 
-# 应用命令行参数覆盖配置文件设置
-if ($PreviewMode) {
-    $config.SyncOptions.PreviewMode = $true
-}
-if ($RequireConfirmation) {
-    $config.SyncOptions.RequireConfirmation = $true
-}
+
 
 foreach ($TargetPath in $TargetPaths) {
-    if (Sync-ToTarget -SourceDir $SourceDir -TargetDir $TargetPath -FullSync $FullSyncMode -ExcludePatterns $ExcludePatterns -SyncOptions $config) {
+    if (Sync-ToTarget -SourceDir $SourceDir -TargetDir $TargetPath -FullSync $FullSyncMode -ExcludePatterns $ExcludePatterns) {
         $SuccessCount++
     } else {
         $FailCount++
