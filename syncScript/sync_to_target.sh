@@ -404,16 +404,12 @@ update_total_sync_log() {
     local added_count="$3"
     local modified_count="$4"
     local deleted_count="$5"
-    shift 5
-    local new_files_added=("$@")
+    local new_files_added_str="$6"
+    local new_files_modified_str="$7"
+    local new_files_deleted_str="$8"
     
     # 如果统计日志文件不存在，创建新的
     if [ ! -f "$total_log_file" ]; then
-        local added_json="[]"
-        if [ ${#new_files_added[@]} -gt 0 ]; then
-            added_json="[$(printf '"%s",' "${new_files_added[@]}" | sed 's/,$//')]"
-        fi
-        
         cat > "$total_log_file" << EOF
 {
     "last_updated": "$timestamp",
@@ -424,9 +420,9 @@ update_total_sync_log() {
         "total_files_deleted": $deleted_count
     },
     "all_files": {
-        "added": $added_json,
-        "modified": [],
-        "deleted": []
+        "added": $new_files_added_str,
+        "modified": $new_files_modified_str,
+        "deleted": $new_files_deleted_str
     }
 }
 EOF
@@ -447,25 +443,10 @@ EOF
             local new_total_modified=$((existing_modified + modified_count))
             local new_total_deleted=$((existing_deleted + deleted_count))
             
-            # 合并文件列表
-            local merged_added=$(jq -r '.all_files.added[]' "$total_log_file" 2>/dev/null)
-            local all_added_files=()
-            
-            # 添加现有文件
-            while IFS= read -r file; do
-                [ -n "$file" ] && all_added_files+=("$file")
-            done <<< "$merged_added"
-            
-            # 添加新文件
-            for file in "${new_files_added[@]}"; do
-                all_added_files+=("$file")
-            done
-            
-            # 生成新的 JSON
-            local added_json="[]"
-            if [ ${#all_added_files[@]} -gt 0 ]; then
-                added_json="[$(printf '"%s",' "${all_added_files[@]}" | sed 's/,$//')]"
-            fi
+            # 合并文件列表 - 使用 jq 来合并数组
+            local merged_added=$(jq -c --argjson new "$new_files_added_str" '.all_files.added + $new' "$total_log_file")
+            local merged_modified=$(jq -c --argjson new "$new_files_modified_str" '.all_files.modified + $new' "$total_log_file")
+            local merged_deleted=$(jq -c --argjson new "$new_files_deleted_str" '.all_files.deleted + $new' "$total_log_file")
             
             cat > "$temp_file" << EOF
 {
@@ -477,9 +458,9 @@ EOF
         "total_files_deleted": $new_total_deleted
     },
     "all_files": {
-        "added": $added_json,
-        "modified": [],
-        "deleted": []
+        "added": $merged_added,
+        "modified": $merged_modified,
+        "deleted": $merged_deleted
     }
 }
 EOF
@@ -623,8 +604,9 @@ sync_to_target() {
         # 增量同步模式：只同步 Git 变更的文件
         if [ -n "$changed_files" ]; then
             while IFS=$'\t' read -r status file_path; do
-                # 排除 syncScript 文件夹
-                if [[ "$file_path" == syncScript/* ]] || [[ "$file_path" == syncScript\\* ]]; then
+                # 排除 syncScript 文件夹（支持多种路径格式）
+                if [[ "$file_path" == syncScript/* ]] || [[ "$file_path" == syncScript\\* ]] || [[ "$file_path" == syncScript* ]]; then
+                    echo "[跳过] $file_path (syncScript 文件夹)"
                     continue
                 fi
                 
@@ -782,7 +764,7 @@ EOF
     cp "$source_log_file" "$target_log_file"
     
     # 更新统计日志
-    update_total_sync_log "$total_log_file" "$timestamp_iso" "$added_count" "$modified_count" "$deleted_count" "${files_added[@]}"
+    update_total_sync_log "$total_log_file" "$timestamp_iso" "$added_count" "$modified_count" "$deleted_count" "$added_json" "$modified_json" "$deleted_json"
     
     # 显示结果
     echo "同步完成!"
