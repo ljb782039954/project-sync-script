@@ -405,10 +405,15 @@ update_total_sync_log() {
     local modified_count="$4"
     local deleted_count="$5"
     shift 5
-    local files_added=("$@")
+    local new_files_added=("$@")
     
     # 如果统计日志文件不存在，创建新的
     if [ ! -f "$total_log_file" ]; then
+        local added_json="[]"
+        if [ ${#new_files_added[@]} -gt 0 ]; then
+            added_json="[$(printf '"%s",' "${new_files_added[@]}" | sed 's/,$//')]"
+        fi
+        
         cat > "$total_log_file" << EOF
 {
     "last_updated": "$timestamp",
@@ -419,13 +424,71 @@ update_total_sync_log() {
         "total_files_deleted": $deleted_count
     },
     "all_files": {
-        "added": [$(printf '"%s",' "${files_added[@]}" | sed 's/,$//')]
+        "added": $added_json,
+        "modified": [],
+        "deleted": []
     }
 }
 EOF
     else
-        # 更新现有的统计日志（简化版本，实际应该用 jq 来处理）
-        echo "已更新统计日志: $total_log_file"
+        # 使用 jq 更新现有的统计日志（如果可用）
+        if command -v jq >/dev/null 2>&1; then
+            local temp_file=$(mktemp)
+            
+            # 读取现有数据
+            local existing_total_syncs=$(jq -r '.total_syncs' "$total_log_file")
+            local existing_added=$(jq -r '.summary.total_files_added' "$total_log_file")
+            local existing_modified=$(jq -r '.summary.total_files_modified' "$total_log_file")
+            local existing_deleted=$(jq -r '.summary.total_files_deleted' "$total_log_file")
+            
+            # 计算新的总数
+            local new_total_syncs=$((existing_total_syncs + 1))
+            local new_total_added=$((existing_added + added_count))
+            local new_total_modified=$((existing_modified + modified_count))
+            local new_total_deleted=$((existing_deleted + deleted_count))
+            
+            # 合并文件列表
+            local merged_added=$(jq -r '.all_files.added[]' "$total_log_file" 2>/dev/null)
+            local all_added_files=()
+            
+            # 添加现有文件
+            while IFS= read -r file; do
+                [ -n "$file" ] && all_added_files+=("$file")
+            done <<< "$merged_added"
+            
+            # 添加新文件
+            for file in "${new_files_added[@]}"; do
+                all_added_files+=("$file")
+            done
+            
+            # 生成新的 JSON
+            local added_json="[]"
+            if [ ${#all_added_files[@]} -gt 0 ]; then
+                added_json="[$(printf '"%s",' "${all_added_files[@]}" | sed 's/,$//')]"
+            fi
+            
+            cat > "$temp_file" << EOF
+{
+    "last_updated": "$timestamp",
+    "total_syncs": $new_total_syncs,
+    "summary": {
+        "total_files_added": $new_total_added,
+        "total_files_modified": $new_total_modified,
+        "total_files_deleted": $new_total_deleted
+    },
+    "all_files": {
+        "added": $added_json,
+        "modified": [],
+        "deleted": []
+    }
+}
+EOF
+            
+            mv "$temp_file" "$total_log_file"
+            echo "已更新统计日志: $total_log_file"
+        else
+            echo "警告: 未安装 jq，无法更新统计日志。建议安装 jq 以获得完整功能。"
+        fi
     fi
 }
 
@@ -549,6 +612,8 @@ sync_to_target() {
     
     # 解析 Git 变更并记录
     local files_to_sync=()
+    local files_added=()
+    local files_modified=()
     local files_to_delete=()
     
     if [ "$full_sync" = true ]; then
@@ -573,11 +638,13 @@ sync_to_target() {
                     A)
                         echo "[新增] $file_path"
                         files_to_sync+=("$file_path")
+                        files_added+=("$file_path")
                         ((added_count++))
                         ;;
                     M)
                         echo "[修改] $file_path"
                         files_to_sync+=("$file_path")
+                        files_modified+=("$file_path")
                         ((modified_count++))
                         ;;
                     D)
@@ -670,6 +737,23 @@ sync_to_target() {
     local timestamp_iso=$(date -u +"%Y-%m-%dT%H:%M:%S.%3NZ" 2>/dev/null || date -u +"%Y-%m-%dT%H:%M:%SZ")
     local git_repo_bool=$(if [ "$has_git_repo" = true ]; then echo "true"; else echo "false"; fi)
     
+    # 准备文件列表的 JSON 数组
+    local added_json="[]"
+    local modified_json="[]"
+    local deleted_json="[]"
+    
+    if [ ${#files_added[@]} -gt 0 ]; then
+        added_json="[$(printf '"%s",' "${files_added[@]}" | sed 's/,$//')]"
+    fi
+    
+    if [ ${#files_modified[@]} -gt 0 ]; then
+        modified_json="[$(printf '"%s",' "${files_modified[@]}" | sed 's/,$//')]"
+    fi
+    
+    if [ ${#files_to_delete[@]} -gt 0 ]; then
+        deleted_json="[$(printf '"%s",' "${files_to_delete[@]}" | sed 's/,$//')]"
+    fi
+    
     # 创建 JSON 日志内容
     cat > "$source_log_file" << EOF
 {
@@ -684,7 +768,9 @@ sync_to_target() {
         "deleted": $deleted_count
     },
     "files": {
-        "added": [$(printf '"%s",' "${files_to_sync[@]}" | sed 's/,$//')]
+        "added": $added_json,
+        "modified": $modified_json,
+        "deleted": $deleted_json
     },
     "duration_ms": 0,
     "status": "success",
@@ -696,7 +782,7 @@ EOF
     cp "$source_log_file" "$target_log_file"
     
     # 更新统计日志
-    update_total_sync_log "$total_log_file" "$timestamp_iso" "$added_count" "$modified_count" "$deleted_count" "${files_to_sync[@]}"
+    update_total_sync_log "$total_log_file" "$timestamp_iso" "$added_count" "$modified_count" "$deleted_count" "${files_added[@]}"
     
     # 显示结果
     echo "同步完成!"
