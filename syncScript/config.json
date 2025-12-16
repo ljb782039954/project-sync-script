@@ -10,8 +10,16 @@
     "node_modules/",
     "dist/",
     "build/",
-    "test-pattern.js"，
+    "test-pattern.js",
     ".gitignore"
-  ]
+  ],
+  "log_retention": {
+    "max_logs": 30,
+    "auto_cleanup": true
+  },
+  "sync_options": {
+    "preview_mode": false,
+    "require_confirmation": false
+  }
 }
 

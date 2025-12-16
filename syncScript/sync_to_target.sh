@@ -6,11 +6,51 @@
 #   2. 完全同步: ./sync_to_target.sh --all
 
 FULL_SYNC=false
-if [ "$1" = "--all" ]; then
-    FULL_SYNC=true
-fi
+PREVIEW_MODE=false
+REQUIRE_CONFIRMATION=false
+
+# 解析命令行参数
+for arg in "$@"; do
+    case "$arg" in
+        --all)
+            FULL_SYNC=true
+            ;;
+        --preview|-p)
+            PREVIEW_MODE=true
+            ;;
+        --confirm|-c)
+            REQUIRE_CONFIRMATION=true
+            ;;
+    esac
+done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# 检查依赖工具
+check_dependencies() {
+    local missing_deps=()
+    
+    if ! command -v git >/dev/null 2>&1; then
+        missing_deps+=("git")
+    fi
+    
+    # 检查文件同步工具
+    if ! command -v rsync >/dev/null 2>&1; then
+        if ! command -v cp >/dev/null 2>&1; then
+            missing_deps+=("rsync 或 cp")
+        else
+            echo "警告: rsync 不可用，将使用 cp 命令进行文件同步" >&2
+        fi
+    fi
+    
+    if [ ${#missing_deps[@]} -gt 0 ]; then
+        echo "错误: 缺少必要的工具: ${missing_deps[*]}" >&2
+        echo "请安装这些工具后重试" >&2
+        return 1
+    fi
+    
+    return 0
+}
 
 # 读取 JSON 配置文件（使用 jq 如果可用，否则使用简单解析）
 read_json_config_file() {
@@ -53,6 +93,14 @@ read_json_config_file() {
                 exclude_patterns+=("$pattern")
             fi
         done < <(jq -r '.exclude_patterns[]?' "$config_path" 2>/dev/null)
+        
+        # 解析 log_retention
+        local max_logs=$(jq -r '.log_retention.max_logs // 30' "$config_path" 2>/dev/null)
+        local auto_cleanup=$(jq -r '.log_retention.auto_cleanup // true' "$config_path" 2>/dev/null)
+        
+        # 解析 sync_options
+        local preview_mode=$(jq -r '.sync_options.preview_mode // false' "$config_path" 2>/dev/null)
+        local require_confirmation=$(jq -r '.sync_options.require_confirmation // false' "$config_path" 2>/dev/null)
     else
         # 简单的 JSON 解析（不依赖 jq）
         # 提取 source_path
@@ -105,6 +153,12 @@ read_json_config_file() {
     for pattern in "${exclude_patterns[@]}"; do
         echo "$pattern"
     done
+    # 输出配置选项
+    echo "---CONFIG_OPTIONS---"
+    echo "$max_logs"
+    echo "$auto_cleanup"
+    echo "$preview_mode"
+    echo "$require_confirmation"
 }
 
 # 读取配置文件（JSON 格式）
@@ -243,6 +297,131 @@ test_exclude_pattern() {
     done
     
     return 1
+}
+
+# 验证配置文件
+validate_config() {
+    local source_path="$1"
+    local target_paths_count="$2"
+    local max_logs="$3"
+    
+    local errors=()
+    
+    if [ -z "$source_path" ]; then
+        errors+=("source_path 不能为空")
+    fi
+    
+    if [ "$target_paths_count" -eq 0 ]; then
+        errors+=("至少需要配置一个目标路径")
+    fi
+    
+    if [ "$max_logs" -lt 1 ]; then
+        errors+=("max_logs 必须大于 0")
+    fi
+    
+    if [ ${#errors[@]} -gt 0 ]; then
+        echo "配置文件错误:" >&2
+        for error in "${errors[@]}"; do
+            echo "  - $error" >&2
+        done
+        return 1
+    fi
+    
+    return 0
+}
+
+# 清理旧日志文件
+cleanup_old_logs() {
+    local log_dir="$1"
+    local max_logs="$2"
+    local auto_cleanup="$3"
+    
+    if [ "$auto_cleanup" != "true" ] || [ ! -d "$log_dir" ]; then
+        return
+    fi
+    
+    local log_files=($(ls -t "$log_dir"/sync_*.txt 2>/dev/null))
+    local total_logs=${#log_files[@]}
+    
+    if [ "$total_logs" -gt "$max_logs" ]; then
+        local files_to_delete=$((total_logs - max_logs))
+        local deleted_count=0
+        
+        for ((i=max_logs; i<total_logs; i++)); do
+            if rm -f "${log_files[$i]}" 2>/dev/null; then
+                ((deleted_count++))
+            fi
+        done
+        
+        if [ "$deleted_count" -gt 0 ]; then
+            echo "已清理 $deleted_count 个旧日志文件"
+        fi
+    fi
+}
+
+# 显示同步预览
+show_sync_preview() {
+    local source_dir="$1"
+    local target_dir="$2"
+    local full_sync="$3"
+    local added_count="$4"
+    local modified_count="$5"
+    local deleted_count="$6"
+    shift 6
+    local files_to_sync=("$@")
+    
+    echo ""
+    echo "============================================================"
+    echo "同步预览"
+    echo "============================================================"
+    echo "源目录: $source_dir"
+    echo "目标目录: $target_dir"
+    echo "同步模式: $(if [ "$full_sync" = true ]; then echo '完全同步'; else echo '增量同步'; fi)"
+    echo ""
+    
+    if [ "$full_sync" = true ]; then
+        echo "将执行完全同步（所有文件）"
+    else
+        echo "统计信息:"
+        echo "  新增文件: $added_count"
+        echo "  修改文件: $modified_count"
+        echo "  删除文件: $deleted_count"
+        
+        if [ ${#files_to_sync[@]} -gt 0 ]; then
+            echo ""
+            echo "将同步的文件:"
+            for file in "${files_to_sync[@]}"; do
+                echo "  + $file"
+            done
+        fi
+        
+        if [ $((added_count + modified_count + deleted_count)) -eq 0 ]; then
+            echo "没有文件需要同步"
+        fi
+    fi
+    
+    echo ""
+    echo "============================================================"
+}
+
+# 用户确认函数
+get_user_confirmation() {
+    local message="${1:-是否继续执行同步？}"
+    
+    while true; do
+        read -p "$message (y/n): " response
+        case "$response" in
+            [Yy]|[Yy][Ee][Ss])
+                return 0
+                ;;
+            [Nn]|[Nn][Oo])
+                return 1
+                ;;
+            *)
+                echo "请输入 y 或 n"
+                ;;
+        esac
+    done
 }
 
 # 同步到单个目标目录的函数
@@ -457,6 +636,11 @@ sync_to_target() {
 # 主程序逻辑
 # ============================================================================
 
+# 检查依赖工具
+if ! check_dependencies; then
+    exit 1
+fi
+
 # 读取配置文件
 mapfile -t config_lines < <(read_config_file "$SCRIPT_DIR")
 
@@ -470,6 +654,14 @@ if [ ${#config_lines[@]} -eq 0 ]; then
     echo '  "target_paths": {'
     echo '    "default": "目标项目路径1",'
     echo '    "version2": "目标项目路径2"'
+    echo '  },'
+    echo '  "log_retention": {'
+    echo '    "max_logs": 30,'
+    echo '    "auto_cleanup": true'
+    echo '  },'
+    echo '  "sync_options": {'
+    echo '    "preview_mode": false,'
+    echo '    "require_confirmation": false'
     echo '  }'
     echo '}'
     exit 1
@@ -487,18 +679,25 @@ fi
 # 安装 Git Hook
 install_git_hook "$SCRIPT_DIR" "$source_dir"
 
-# 解析配置行，找到排除模式分隔符
+# 解析配置行，找到分隔符
 target_paths=()
 exclude_patterns=()
-found_separator=false
+config_options=()
+found_exclude_separator=false
+found_config_separator=false
 
 for ((i=1; i<${#config_lines[@]}; i++)); do
     if [ "${config_lines[$i]}" = "---EXCLUDE_PATTERNS---" ]; then
-        found_separator=true
+        found_exclude_separator=true
+        continue
+    elif [ "${config_lines[$i]}" = "---CONFIG_OPTIONS---" ]; then
+        found_config_separator=true
         continue
     fi
     
-    if [ "$found_separator" = true ]; then
+    if [ "$found_config_separator" = true ]; then
+        config_options+=("${config_lines[$i]}")
+    elif [ "$found_exclude_separator" = true ]; then
         exclude_patterns+=("${config_lines[$i]}")
     else
         target_path=$(resolve_path_safe "${config_lines[$i]}" "$SCRIPT_DIR")
@@ -506,9 +705,30 @@ for ((i=1; i<${#config_lines[@]}; i++)); do
     fi
 done
 
-if [ ${#target_paths[@]} -eq 0 ]; then
-    echo "错误: 配置文件中没有找到目标路径"
+# 解析配置选项
+max_logs=30
+auto_cleanup=true
+config_preview_mode=false
+config_require_confirmation=false
+
+if [ ${#config_options[@]} -ge 4 ]; then
+    max_logs="${config_options[0]}"
+    auto_cleanup="${config_options[1]}"
+    config_preview_mode="${config_options[2]}"
+    config_require_confirmation="${config_options[3]}"
+fi
+
+# 验证配置
+if ! validate_config "$source_path" "${#target_paths[@]}" "$max_logs"; then
     exit 1
+fi
+
+# 应用命令行参数覆盖配置文件设置
+if [ "$PREVIEW_MODE" = true ]; then
+    config_preview_mode=true
+fi
+if [ "$REQUIRE_CONFIRMATION" = true ]; then
+    config_require_confirmation=true
 fi
 
 echo "找到 ${#target_paths[@]} 个目标路径"

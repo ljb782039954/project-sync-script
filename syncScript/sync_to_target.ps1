@@ -9,13 +9,23 @@ param(
     [string[]]$RemainingArgs
 )
 
-# 手动解析命令行参数（支持 --all，与 Bash 保持一致）
+# 手动解析命令行参数
 $FullSyncMode = $false
+$PreviewMode = $false
+$RequireConfirmation = $false
+
 if ($RemainingArgs) {
     foreach ($arg in $RemainingArgs) {
-        if ($arg -eq "--all" -or $arg -eq "-All" -or $arg -eq "-all") {
-            $FullSyncMode = $true
-            break
+        switch ($arg) {
+            { $_ -eq "--all" -or $_ -eq "-All" -or $_ -eq "-all" } {
+                $FullSyncMode = $true
+            }
+            { $_ -eq "--preview" -or $_ -eq "-Preview" -or $_ -eq "-p" } {
+                $PreviewMode = $true
+            }
+            { $_ -eq "--confirm" -or $_ -eq "-Confirm" -or $_ -eq "-c" } {
+                $RequireConfirmation = $true
+            }
         }
     }
 }
@@ -24,6 +34,33 @@ if ($RemainingArgs) {
 $ScriptDir = $PSScriptRoot
 if (-not $ScriptDir) {
     $ScriptDir = Get-Location
+}
+
+# 检查依赖工具
+function Test-Dependencies {
+    $missingDeps = @()
+    
+    # 检查 Git
+    try {
+        $null = git --version 2>$null
+    } catch {
+        $missingDeps += "Git"
+    }
+    
+    # 检查 robocopy（Windows 内置，通常都有）
+    try {
+        $null = robocopy /? 2>$null
+    } catch {
+        $missingDeps += "robocopy"
+    }
+    
+    if ($missingDeps.Count -gt 0) {
+        Write-Host "错误: 缺少必要的工具: $($missingDeps -join ', ')" -ForegroundColor Red
+        Write-Host "请安装这些工具后重试" -ForegroundColor Yellow
+        return $false
+    }
+    
+    return $true
 }
 
 # 读取 JSON 配置文件
@@ -38,6 +75,14 @@ function Read-JsonConfigFile {
             SourcePath = ""
             TargetPaths = @()
             ExcludePatterns = @()
+            LogRetention = @{
+                MaxLogs = 30
+                AutoCleanup = $true
+            }
+            SyncOptions = @{
+                PreviewMode = $false
+                RequireConfirmation = $false
+            }
         }
         
         # 解析 source_path
@@ -63,10 +108,103 @@ function Read-JsonConfigFile {
             }
         }
         
+        # 解析 log_retention
+        if ($jsonObj.log_retention) {
+            if ($jsonObj.log_retention.max_logs) {
+                $config.LogRetention.MaxLogs = $jsonObj.log_retention.max_logs
+            }
+            if ($null -ne $jsonObj.log_retention.auto_cleanup) {
+                $config.LogRetention.AutoCleanup = $jsonObj.log_retention.auto_cleanup
+            }
+        }
+        
+        # 解析 sync_options
+        if ($jsonObj.sync_options) {
+            if ($null -ne $jsonObj.sync_options.preview_mode) {
+                $config.SyncOptions.PreviewMode = $jsonObj.sync_options.preview_mode
+            }
+            if ($null -ne $jsonObj.sync_options.require_confirmation) {
+                $config.SyncOptions.RequireConfirmation = $jsonObj.sync_options.require_confirmation
+            }
+        }
+        
         return $config
     } catch {
         Write-Host "错误: JSON 配置文件格式不正确: $_" -ForegroundColor Red
         return $null
+    }
+}
+
+# 验证配置文件
+function Test-ConfigFile {
+    param([object]$Config)
+    
+    $errors = @()
+    
+    if ([string]::IsNullOrWhiteSpace($Config.SourcePath)) {
+        $errors += "source_path 不能为空"
+    }
+    
+    if ($Config.TargetPaths.Count -eq 0) {
+        $errors += "至少需要配置一个目标路径"
+    }
+    
+    # 检查源路径是否存在
+    if (-not [string]::IsNullOrWhiteSpace($Config.SourcePath)) {
+        $sourcePath = Resolve-PathSafe -Path $Config.SourcePath -BaseDir $PSScriptRoot
+        if (-not (Test-Path $sourcePath)) {
+            $errors += "源路径不存在: $sourcePath"
+        }
+    }
+    
+    # 验证日志保留配置
+    if ($Config.LogRetention.MaxLogs -lt 1) {
+        $errors += "max_logs 必须大于 0"
+    }
+    
+    if ($errors.Count -gt 0) {
+        Write-Host "配置文件错误:" -ForegroundColor Red
+        $errors | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
+        return $false
+    }
+    
+    return $true
+}
+
+# 清理旧日志文件
+function Clear-OldLogs {
+    param(
+        [string]$LogDir,
+        [int]$MaxLogs,
+        [bool]$AutoCleanup
+    )
+    
+    if (-not $AutoCleanup -or -not (Test-Path $LogDir)) {
+        return
+    }
+    
+    try {
+        $logFiles = Get-ChildItem -Path $LogDir -Filter "sync_*.txt" | Sort-Object CreationTime -Descending
+        
+        if ($logFiles.Count -gt $MaxLogs) {
+            $filesToDelete = $logFiles | Select-Object -Skip $MaxLogs
+            $deletedCount = 0
+            
+            foreach ($file in $filesToDelete) {
+                try {
+                    Remove-Item -Path $file.FullName -Force
+                    $deletedCount++
+                } catch {
+                    Write-Host "警告: 无法删除日志文件 $($file.Name)" -ForegroundColor Yellow
+                }
+            }
+            
+            if ($deletedCount -gt 0) {
+                Write-Host "已清理 $deletedCount 个旧日志文件" -ForegroundColor Green
+            }
+        }
+    } catch {
+        Write-Host "警告: 清理日志文件时出错: $_" -ForegroundColor Yellow
     }
 }
 
@@ -232,13 +370,79 @@ function Test-ExcludePattern {
     return $false
 }
 
+# 显示同步预览
+function Show-SyncPreview {
+    param(
+        [string]$SourceDir,
+        [string]$TargetDir,
+        [bool]$FullSync,
+        [array]$FilesToSync,
+        [array]$FilesToDelete,
+        [int]$AddedCount,
+        [int]$ModifiedCount,
+        [int]$DeletedCount
+    )
+    
+    Write-Host "`n" + "=" * 60 -ForegroundColor Cyan
+    Write-Host "同步预览" -ForegroundColor Cyan
+    Write-Host "=" * 60 -ForegroundColor Cyan
+    Write-Host "源目录: $SourceDir" -ForegroundColor Yellow
+    Write-Host "目标目录: $TargetDir" -ForegroundColor Yellow
+    Write-Host "同步模式: $(if ($FullSync) { '完全同步' } else { '增量同步' })" -ForegroundColor Yellow
+    Write-Host ""
+    
+    if ($FullSync) {
+        Write-Host "将执行完全同步（所有文件）" -ForegroundColor Green
+    } else {
+        Write-Host "统计信息:" -ForegroundColor White
+        Write-Host "  新增文件: $AddedCount" -ForegroundColor Green
+        Write-Host "  修改文件: $ModifiedCount" -ForegroundColor Yellow
+        Write-Host "  删除文件: $DeletedCount" -ForegroundColor Red
+        
+        if ($FilesToSync.Count -gt 0) {
+            Write-Host "`n将同步的文件:" -ForegroundColor White
+            $FilesToSync | ForEach-Object { Write-Host "  + $_" -ForegroundColor Green }
+        }
+        
+        if ($FilesToDelete.Count -gt 0) {
+            Write-Host "`n将删除的文件:" -ForegroundColor White
+            $FilesToDelete | ForEach-Object { Write-Host "  - $_" -ForegroundColor Red }
+        }
+        
+        if ($FilesToSync.Count -eq 0 -and $FilesToDelete.Count -eq 0) {
+            Write-Host "没有文件需要同步" -ForegroundColor Gray
+        }
+    }
+    
+    Write-Host "`n" + "=" * 60 -ForegroundColor Cyan
+}
+
+# 用户确认函数
+function Get-UserConfirmation {
+    param([string]$Message = "是否继续执行同步？")
+    
+    do {
+        $response = Read-Host "$Message (y/n)"
+        $response = $response.ToLower().Trim()
+        
+        if ($response -eq 'y' -or $response -eq 'yes') {
+            return $true
+        } elseif ($response -eq 'n' -or $response -eq 'no') {
+            return $false
+        } else {
+            Write-Host "请输入 y 或 n" -ForegroundColor Yellow
+        }
+    } while ($true)
+}
+
 # 同步到单个目标目录的函数
 function Sync-ToTarget {
     param(
         [string]$SourceDir,
         [string]$TargetDir,
         [bool]$FullSync = $false,
-        [string[]]$ExcludePatterns = @()
+        [string[]]$ExcludePatterns = @(),
+        [object]$SyncOptions = @{}
     )
     
     Write-Host "`n开始同步到: $TargetDir" -ForegroundColor Cyan
@@ -355,6 +559,23 @@ function Sync-ToTarget {
                 $LogContent += "[增量同步] 未检测到 Git 变更"
             } else {
                 $LogContent += "[增量同步] 当前目录不是 Git 仓库，无法进行增量同步"
+            }
+        }
+    }
+    
+    # 显示预览（如果启用）
+    if ($SyncOptions.PreviewMode -or $SyncOptions.RequireConfirmation) {
+        Show-SyncPreview -SourceDir $SourceDir -TargetDir $TargetDir -FullSync $FullSync -FilesToSync $FilesToSync -FilesToDelete $FilesToDelete -AddedCount $AddedCount -ModifiedCount $ModifiedCount -DeletedCount $DeletedCount
+        
+        if ($SyncOptions.PreviewMode) {
+            Write-Host "预览模式：不执行实际同步操作" -ForegroundColor Yellow
+            return $true
+        }
+        
+        if ($SyncOptions.RequireConfirmation) {
+            if (-not (Get-UserConfirmation)) {
+                Write-Host "用户取消同步操作" -ForegroundColor Yellow
+                return $true
             }
         }
     }
@@ -490,6 +711,12 @@ function Sync-ToTarget {
     [System.IO.File]::WriteAllLines($SourceLogFile, $LogContent, $Utf8WithBom)
     [System.IO.File]::WriteAllLines($TargetLogFile, $LogContent, $Utf8WithBom)
     
+    # 清理旧日志文件
+    if ($SyncOptions.LogRetention) {
+        Clear-OldLogs -LogDir $SourceLogDir -MaxLogs $SyncOptions.LogRetention.MaxLogs -AutoCleanup $SyncOptions.LogRetention.AutoCleanup
+        Clear-OldLogs -LogDir $TargetLogDir -MaxLogs $SyncOptions.LogRetention.MaxLogs -AutoCleanup $SyncOptions.LogRetention.AutoCleanup
+    }
+    
     # 显示结果
     Write-Host "同步完成!" -ForegroundColor Green
     Write-Host "原始项目: $SourceDir" -ForegroundColor Cyan
@@ -505,6 +732,11 @@ function Sync-ToTarget {
 # 主程序逻辑
 # ============================================================================
 
+# 检查依赖工具
+if (-not (Test-Dependencies)) {
+    exit 1
+}
+
 # 读取配置文件
 $config = Read-ConfigFile -ScriptDir $ScriptDir
 
@@ -518,8 +750,21 @@ if ($null -eq $config -or [string]::IsNullOrWhiteSpace($config.SourcePath)) {
     Write-Host '  "target_paths": {' -ForegroundColor Gray
     Write-Host '    "default": "目标项目路径1",' -ForegroundColor Gray
     Write-Host '    "version2": "目标项目路径2"' -ForegroundColor Gray
+    Write-Host '  },' -ForegroundColor Gray
+    Write-Host '  "log_retention": {' -ForegroundColor Gray
+    Write-Host '    "max_logs": 30,' -ForegroundColor Gray
+    Write-Host '    "auto_cleanup": true' -ForegroundColor Gray
+    Write-Host '  },' -ForegroundColor Gray
+    Write-Host '  "sync_options": {' -ForegroundColor Gray
+    Write-Host '    "preview_mode": false,' -ForegroundColor Gray
+    Write-Host '    "require_confirmation": false' -ForegroundColor Gray
     Write-Host '  }' -ForegroundColor Gray
     Write-Host '}' -ForegroundColor Gray
+    exit 1
+}
+
+# 验证配置文件
+if (-not (Test-ConfigFile -Config $config)) {
     exit 1
 }
 
@@ -556,8 +801,16 @@ if ($config.ExcludePatterns) {
     $ExcludePatterns = $config.ExcludePatterns
 }
 
+# 应用命令行参数覆盖配置文件设置
+if ($PreviewMode) {
+    $config.SyncOptions.PreviewMode = $true
+}
+if ($RequireConfirmation) {
+    $config.SyncOptions.RequireConfirmation = $true
+}
+
 foreach ($TargetPath in $TargetPaths) {
-    if (Sync-ToTarget -SourceDir $SourceDir -TargetDir $TargetPath -FullSync $FullSyncMode -ExcludePatterns $ExcludePatterns) {
+    if (Sync-ToTarget -SourceDir $SourceDir -TargetDir $TargetPath -FullSync $FullSyncMode -ExcludePatterns $ExcludePatterns -SyncOptions $config) {
         $SuccessCount++
     } else {
         $FailCount++
