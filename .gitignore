@@ -34,3 +34,5 @@ desktop.ini
 .cache/
 
 .syncScript_logs/
+
+#测试是否排除了.gitigonre 如果测试目标项目中出现这行，说明未排除。
