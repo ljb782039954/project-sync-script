@@ -7,8 +7,7 @@
     "statistics": {
         "added": 2,
         "modified": 1,
-        "deleted": 0,
-        "total": 3
+        "deleted": 0
     },
     "files": {
         "added": [
@@ -20,10 +19,6 @@
         ],
         "deleted": []
     },
-    "excluded_files": [
-        "node_modules/package.json",
-        "dist/main.js"
-    ],
     "duration_ms": 1250,
     "status": "success",
     "errors": []

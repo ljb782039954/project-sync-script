@@ -224,9 +224,7 @@ function Update-TotalSyncLog {
                 total_files_added = $LogData.statistics.added
                 total_files_modified = $LogData.statistics.modified
                 total_files_deleted = $LogData.statistics.deleted
-                total_operations = $LogData.statistics.total
             }
-            recent_syncs = @()
             all_files = @{
                 added = @()
                 modified = @()
@@ -242,10 +240,6 @@ function Update-TotalSyncLog {
             $totalLog.summary.total_files_added = $existingLog.summary.total_files_added + $LogData.statistics.added
             $totalLog.summary.total_files_modified = $existingLog.summary.total_files_modified + $LogData.statistics.modified
             $totalLog.summary.total_files_deleted = $existingLog.summary.total_files_deleted + $LogData.statistics.deleted
-            $totalLog.summary.total_operations = $existingLog.summary.total_operations + $LogData.statistics.total
-            
-            # 保留最近的同步记录（最多20条）
-            $totalLog.recent_syncs = @($existingLog.recent_syncs | Select-Object -First 19)
             
             # 合并文件记录
             $totalLog.all_files.added = @($existingLog.all_files.added)
@@ -253,39 +247,17 @@ function Update-TotalSyncLog {
             $totalLog.all_files.deleted = @($existingLog.all_files.deleted)
         }
         
-        # 添加当前同步记录到最近同步列表
-        $recentSync = @{
-            timestamp = $LogData.timestamp
-            sync_mode = $LogData.sync_mode
-            target_dir = $LogData.target_dir
-            statistics = $LogData.statistics
-            status = $LogData.status
-        }
-        $totalLog.recent_syncs = @($recentSync) + $totalLog.recent_syncs
-        
-        # 添加文件记录
+        # 添加当前同步的文件记录
         foreach ($file in $LogData.files.added) {
-            $totalLog.all_files.added += @{
-                file = $file
-                timestamp = $LogData.timestamp
-                target = $LogData.target_dir
-            }
+            $totalLog.all_files.added += $file
         }
         
         foreach ($file in $LogData.files.modified) {
-            $totalLog.all_files.modified += @{
-                file = $file
-                timestamp = $LogData.timestamp
-                target = $LogData.target_dir
-            }
+            $totalLog.all_files.modified += $file
         }
         
         foreach ($file in $LogData.files.deleted) {
-            $totalLog.all_files.deleted += @{
-                file = $file
-                timestamp = $LogData.timestamp
-                target = $LogData.target_dir
-            }
+            $totalLog.all_files.deleted += $file
         }
         
         # 写入统计日志文件
@@ -590,16 +562,14 @@ function Sync-ToTarget {
             added = 0
             modified = 0
             deleted = 0
-            total = 0
         }
         files = @{
             added = @()
             modified = @()
             deleted = @()
         }
-        excluded_files = @()
         duration_ms = 0
-        status = "running"
+        status = "success"
         errors = @()
     }
     
@@ -630,7 +600,6 @@ function Sync-ToTarget {
                     
                     # 检查是否匹配配置的排除模式
                     if (Test-ExcludePattern -FilePath $FilePath -ExcludePatterns $ExcludePatterns) {
-                        $LogData.excluded_files += $FilePath
                         Write-Host "[跳过] $FilePath (匹配排除模式)" -ForegroundColor Gray
                         continue
                     }
@@ -679,7 +648,6 @@ function Sync-ToTarget {
     $LogData.statistics.added = $AddedCount
     $LogData.statistics.modified = $ModifiedCount
     $LogData.statistics.deleted = $DeletedCount
-    $LogData.statistics.total = $AddedCount + $ModifiedCount + $DeletedCount
     }
     
     # 显示预览（如果启用）
@@ -688,6 +656,23 @@ function Sync-ToTarget {
         
         if ($SyncOptions.PreviewMode) {
             Write-Host "预览模式：不执行实际同步操作" -ForegroundColor Yellow
+            
+            # 在预览模式下也生成日志
+            $LogData.statistics.added = $AddedCount
+            $LogData.statistics.modified = $ModifiedCount
+            $LogData.statistics.deleted = $DeletedCount
+            $LogData.status = "preview"
+            $LogData.duration_ms = 0
+            
+            # 写入预览日志
+            try {
+                $LogJson = $LogData | ConvertTo-Json -Depth 10 -Compress:$false
+                [System.IO.File]::WriteAllText($SourceLogFile, $LogJson, [System.Text.Encoding]::UTF8)
+                Write-Host "预览日志已保存: $SourceLogFile" -ForegroundColor Green
+            } catch {
+                Write-Host "警告: 无法写入预览日志: $_" -ForegroundColor Yellow
+            }
+            
             return $true
         }
         
@@ -790,7 +775,7 @@ function Sync-ToTarget {
         # robocopy 返回码: 0-7 表示成功，8+ 表示错误
         if ($RobocopyExitCode -ge 8) {
             Write-Host "警告: robocopy 同步过程中出现错误 (返回码: $RobocopyExitCode)" -ForegroundColor Yellow
-            $LogData.errors += "robocopy 返回码: $RobocopyExitCode"
+            $LogData.errors = @($LogData.errors) + @("robocopy 返回码: $RobocopyExitCode")
             $LogData.status = "warning"
         } else {
             Write-Host "文件同步完成 (robocopy 返回码: $RobocopyExitCode)" -ForegroundColor Green
@@ -805,7 +790,7 @@ function Sync-ToTarget {
                 Remove-Item -Path $TargetFile -Force -Recurse -ErrorAction Stop
                 Write-Host "[已删除] $FilePath" -ForegroundColor Red
             } catch {
-                $LogData.errors += "删除失败: $FilePath - $_"
+                $LogData.errors = @($LogData.errors) + @("删除失败: $FilePath - $_")
                 Write-Host "警告: 无法删除文件 $FilePath" -ForegroundColor Yellow
                 $LogData.status = "warning"
             }

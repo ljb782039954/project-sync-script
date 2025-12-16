@@ -377,22 +377,22 @@ generate_json_log() {
     # 创建 JSON 结构
     cat << EOF
 {
-  "timestamp": "$timestamp",
-  "sync_mode": "$sync_mode",
-  "source_dir": "$source_dir",
-  "target_dir": "$target_dir",
-  "git_repo": $git_repo,
-  "statistics": {
-    "added": $added_count,
-    "modified": $modified_count,
-    "deleted": $deleted_count,
-    "total": $((added_count + modified_count + deleted_count))
-  },
-  "files": {
-    "added": [$(printf '"%s",' "${files_added[@]}" | sed 's/,$//')]
-  },
-  "duration_ms": $duration_ms,
-  "status": "$status"
+    "timestamp": "$timestamp",
+    "sync_mode": "$sync_mode",
+    "source_dir": "$source_dir",
+    "target_dir": "$target_dir",
+    "git_repo": $git_repo,
+    "statistics": {
+        "added": $added_count,
+        "modified": $modified_count,
+        "deleted": $deleted_count
+    },
+    "files": {
+        "added": [$(printf '"%s",' "${files_added[@]}" | sed 's/,$//')]
+    },
+    "duration_ms": $duration_ms,
+    "status": "$status",
+    "errors": []
 }
 EOF
 }
@@ -401,38 +401,26 @@ EOF
 update_total_sync_log() {
     local total_log_file="$1"
     local timestamp="$2"
-    local sync_mode="$3"
-    local target_dir="$4"
-    local added_count="$5"
-    local modified_count="$6"
-    local deleted_count="$7"
-    local status="$8"
+    local added_count="$3"
+    local modified_count="$4"
+    local deleted_count="$5"
+    shift 5
+    local files_added=("$@")
     
     # 如果统计日志文件不存在，创建新的
     if [ ! -f "$total_log_file" ]; then
         cat > "$total_log_file" << EOF
 {
-  "last_updated": "$timestamp",
-  "total_syncs": 1,
-  "summary": {
-    "total_files_added": $added_count,
-    "total_files_modified": $modified_count,
-    "total_files_deleted": $deleted_count,
-    "total_operations": $((added_count + modified_count + deleted_count))
-  },
-  "recent_syncs": [
-    {
-      "timestamp": "$timestamp",
-      "sync_mode": "$sync_mode",
-      "target_dir": "$target_dir",
-      "statistics": {
-        "added": $added_count,
-        "modified": $modified_count,
-        "deleted": $deleted_count
-      },
-      "status": "$status"
+    "last_updated": "$timestamp",
+    "total_syncs": 1,
+    "summary": {
+        "total_files_added": $added_count,
+        "total_files_modified": $modified_count,
+        "total_files_deleted": $deleted_count
+    },
+    "all_files": {
+        "added": [$(printf '"%s",' "${files_added[@]}" | sed 's/,$//')]
     }
-  ]
 }
 EOF
     else
@@ -685,22 +673,22 @@ sync_to_target() {
     # 创建 JSON 日志内容
     cat > "$source_log_file" << EOF
 {
-  "timestamp": "$timestamp_iso",
-  "sync_mode": "$sync_mode",
-  "source_dir": "$source_dir",
-  "target_dir": "$target_dir",
-  "git_repo": $git_repo_bool,
-  "statistics": {
-    "added": $added_count,
-    "modified": $modified_count,
-    "deleted": $deleted_count,
-    "total": $((added_count + modified_count + deleted_count))
-  },
-  "files": {
-    "added": [$(printf '"%s",' "${files_to_sync[@]}" | sed 's/,$//')]
-  },
-  "duration_ms": 0,
-  "status": "success"
+    "timestamp": "$timestamp_iso",
+    "sync_mode": "$sync_mode",
+    "source_dir": "$source_dir",
+    "target_dir": "$target_dir",
+    "git_repo": $git_repo_bool,
+    "statistics": {
+        "added": $added_count,
+        "modified": $modified_count,
+        "deleted": $deleted_count
+    },
+    "files": {
+        "added": [$(printf '"%s",' "${files_to_sync[@]}" | sed 's/,$//')]
+    },
+    "duration_ms": 0,
+    "status": "success",
+    "errors": []
 }
 EOF
     
@@ -708,7 +696,7 @@ EOF
     cp "$source_log_file" "$target_log_file"
     
     # 更新统计日志
-    update_total_sync_log "$total_log_file" "$timestamp_iso" "$sync_mode" "$target_dir" "$added_count" "$modified_count" "$deleted_count" "success"
+    update_total_sync_log "$total_log_file" "$timestamp_iso" "$added_count" "$modified_count" "$deleted_count" "${files_to_sync[@]}"
     
     # 显示结果
     echo "同步完成!"
