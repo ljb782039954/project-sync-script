@@ -403,20 +403,20 @@ parse_json_array() {
     local array_path="$2"
     local key="${array_path##*.}"
     
-    # 使用 sed 提取数组内容
-    # 匹配 "key": [ ... ] 的内容
-    local array_content=$(sed -n "/\"$key\":[[:space:]]*\[/,/\]/p" "$json_file" | sed '1d;$d')
+    # 提取整个数组部分（从 "key": [ 到 ]）
+    local array_section=$(sed -n "/\"$key\":[[:space:]]*\[/,/\]/p" "$json_file")
     
-    # 提取所有带引号的字符串，排除逗号和空白
-    echo "$array_content" | grep -o '"[^"]*"' | sed 's/"//g'
+    # 直接从整个数组部分提取所有带引号的字符串
+    # 这样可以处理单行和多行数组
+    echo "$array_section" | grep -o '"[^"]*"' | sed 's/"//g' | grep -v "^$key$"
 }
 
 # 合并 JSON 数组（不依赖 jq）
 merge_json_arrays() {
     local existing_items=("$@")
     
-    # 如果没有项目，返回空数组
-    if [ ${#existing_items[@]} -eq 0 ]; then
+    # 如果没有项目或第一个项目为空，返回空数组
+    if [ ${#existing_items[@]} -eq 0 ] || [ -z "${existing_items[0]}" ]; then
         echo "[]"
         return
     fi
@@ -425,6 +425,11 @@ merge_json_arrays() {
     local json_array="["
     local first=true
     for item in "${existing_items[@]}"; do
+        # 跳过空项
+        if [ -z "$item" ]; then
+            continue
+        fi
+        
         if [ "$first" = true ]; then
             json_array+="\"$item\""
             first=false
