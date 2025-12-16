@@ -605,7 +605,8 @@ sync_to_target() {
         if [ -n "$changed_files" ]; then
             while IFS=$'\t' read -r status file_path; do
                 # 排除 syncScript 文件夹（支持多种路径格式）
-                if [[ "$file_path" == syncScript/* ]] || [[ "$file_path" == syncScript\\* ]] || [[ "$file_path" == syncScript* ]]; then
+                # 检查文件路径是否以 syncScript 开头（后面跟 / 或 \）
+                if [[ "$file_path" =~ ^syncScript[/\\] ]] || [[ "$file_path" == "syncScript" ]]; then
                     echo "[跳过] $file_path (syncScript 文件夹)"
                     continue
                 fi
