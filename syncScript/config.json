@@ -10,7 +10,8 @@
     "node_modules/",
     "dist/",
     "build/",
-    "test-pattern.js"
+    "test-pattern.js"，
+    ".gitignore"
   ]
 }
 
