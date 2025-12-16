@@ -401,12 +401,13 @@ EOF
 parse_json_array() {
     local json_file="$1"
     local array_path="$2"
+    local key="${array_path##*.}"
     
-    # 提取 JSON 数组内容
-    # 例如：.all_files.added -> 提取 "added": [...] 中的内容
-    local array_content=$(grep -A 1000 "\"${array_path##*.}\":" "$json_file" | grep -B 1000 "]" | head -n -1 | tail -n +2)
+    # 使用 sed 提取数组内容
+    # 匹配 "key": [ ... ] 的内容
+    local array_content=$(sed -n "/\"$key\":[[:space:]]*\[/,/\]/p" "$json_file" | sed '1d;$d')
     
-    # 提取所有带引号的字符串
+    # 提取所有带引号的字符串，排除逗号和空白
     echo "$array_content" | grep -o '"[^"]*"' | sed 's/"//g'
 }
 
